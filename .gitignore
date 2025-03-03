@@ -1,0 +1,9 @@
+data/
+logs/
+plots/
+models/
+.vscode/
+backups/
+__pycache__/
+inference_outputs/
+
