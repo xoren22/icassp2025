@@ -24,7 +24,7 @@ def main():
     parser.add_argument('--epochs', type=int, default=200, help='Number of epochs to train')
     parser.add_argument('--lr', type=float, default=3e-4, help='Learning rate')
     parser.add_argument('--img_size', type=int, default=256, help='Image size')
-    parser.add_argument('--iterations', type=int, default=5, help='Number of refinement iterations')
+    parser.add_argument('--iterations', type=int, default=3, help='Number of refinement iterations')
     parser.add_argument('--use_mixed_precision', action='store_true', help='Use mixed precision training')
     parser.add_argument('--data_dir', type=str, default='data', help='Data directory')
     parser.add_argument('--model_dir', type=str, default='models', help='Directory to save models')

@@ -105,7 +105,7 @@ class ResNetIterative(nn.Module):
     It returns all intermediate predictions which can be used for training with multi-step loss.
     """
     
-    def __init__(self, base_model, normalizer, num_iterations=5):
+    def __init__(self, base_model, normalizer, num_iterations=3):
         """
         Initialize the wrapper.
         
