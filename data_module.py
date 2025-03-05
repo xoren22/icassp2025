@@ -135,7 +135,7 @@ class PathlossDataset(Dataset):
             input_img = cv2.resize(input_img, (self.img_size, self.img_size), interpolation=cv2.INTER_NEAREST)
             output_img = cv2.resize(output_img, (self.img_size, self.img_size), interpolation=cv2.INTER_CUBIC)
         
-        radiation_pattern = np.genfromtxt(os.path.join(self.radiation_path, radiation_file), delimiter=',', skip_header=1)
+        radiation_pattern = np.genfromtxt(os.path.join(self.radiation_path, radiation_file), delimiter=',')
 
         x_grid = np.repeat(np.linspace(0, W-1, self.img_size), self.img_size, axis=0).reshape(self.img_size, self.img_size).transpose()
         y_grid = np.repeat(np.linspace(0, H-1, self.img_size), self.img_size, axis=0).reshape(self.img_size, self.img_size)

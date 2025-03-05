@@ -9,13 +9,12 @@ import gc
 
 # Import custom modules
 from data_module import PathlossDataset, PathlossNormalizer
-from model import ResNetModel
 from train_module import train_model, evaluate_iterative_model
 from visualization import visualize_results
 from logger import TrainingLogger
 
 # Import the new iterative model wrapper
-from model import ResNetIterative, ResNetModel
+from model import UNetModel, UNetIterative
 
 def main():
     parser = argparse.ArgumentParser(description='Train and evaluate pathloss prediction model')
@@ -94,7 +93,7 @@ def main():
         np.random.shuffle(file_list)
         
         # Reduce dataset size if needed to save memory
-        max_samples = min(len(file_list), 10_000)  # Limit to 10_000 samples to save memory
+        max_samples = min(len(file_list), 10_000) # Limit to 10_000 samples to save memory
         if len(file_list) > max_samples:
             print(f"Limiting dataset to {max_samples} samples to save memory")
             file_list = file_list[:max_samples]
@@ -130,10 +129,10 @@ def main():
     test_loader = DataLoader(test_dataset, batch_size=1, shuffle=False, num_workers=1)
     
     # Initialize base model
-    base_model = ResNetModel(n_channels=6, n_classes=1, bilinear=True).to(device)
+    base_model = UNetModel(n_channels=6, n_classes=1, bilinear=True).to(device)
     
     # Initialize the iterative refinement wrapper model
-    model = ResNetIterative(
+    model = UNetIterative(
         base_model, 
         num_iterations=args.iterations,
         normalizer=PathlossNormalizer()

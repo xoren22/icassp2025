@@ -1,104 +1,89 @@
 import torch
 import torch.nn as nn
+import segmentation_models_pytorch as smp
 from torch.cuda.amp import autocast
-from torchvision.models import resnet18, ResNet18_Weights
 
 from data_module import PathlossNormalizer
 
 
-class ResNetModel(nn.Module):
+class UNetModel(nn.Module):
     def __init__(self, n_channels=6, n_classes=1, bilinear=True):
         """
-        ResNet-18 based model for predicting updates to pathloss map
+        U-Net based model for predicting updates to pathloss map
         
         Args:
-            n_channels (int): Number of input channels (default: 5)
-            - 4 for environment (reflectance, transmittance, distance, radiation)
+            n_channels (int): Number of input channels (default: 6)
+            - 5 for environment (reflectance, transmittance, distance, radiation, etc.)
             - 1 for current solution
             n_classes (int): Number of output channels (default: 1)
             bilinear (bool): Whether to use bilinear upsampling (default: True)
-                             (included for compatibility with ResNetModel interface)
         """
-        super(ResNetModel, self).__init__()
+        super(UNetModel, self).__init__()
 
         self.normalizer = PathlossNormalizer()
-        
         self.n_channels = n_channels
         self.n_classes = n_classes
+
+        # Load pretrained U-Net with ResNet34 encoder for better feature extraction
+        # We keep pretrained weights for the encoder to leverage transfer learning
+        self.unet = smp.Unet(
+            encoder_name="resnet34",        # Use ResNet34 as the encoder backbone
+            encoder_weights="imagenet",     # Use pretrained weights on ImageNet
+            in_channels=n_channels,         # Match our input channels
+            classes=n_classes,              # Output one channel for pathloss prediction
+            activation=None                 # No activation - we'll handle this ourselves
+        )
         
-        # Load pretrained ResNet-18
-        resnet = resnet18(weights=ResNet18_Weights.IMAGENET1K_V1)
-        
-        # Modify the first conv layer to accept n_channels
-        # Save the weights of the first two layers before modifying
-        first_conv_weights = resnet.conv1.weight.data.clone()
-        first_bn_weights = {
-            'weight': resnet.bn1.weight.data.clone(),
-            'bias': resnet.bn1.bias.data.clone(),
-            'running_mean': resnet.bn1.running_mean.clone(),
-            'running_var': resnet.bn1.running_var.clone()
-        }
-        
-        # Replace the first conv layer to accept n_channels input
-        resnet.conv1 = nn.Conv2d(n_channels, 64, kernel_size=7, stride=2, padding=3, bias=False)
-        
-        # Initialize the new conv layer with proper weights
-        # For the original 3 channels, use the pretrained weights
-        # For the additional channels, initialize with the mean of the pretrained weights
-        with torch.no_grad():
-            if n_channels >= 3:
-                resnet.conv1.weight.data[:, :3, :, :] = first_conv_weights[:, :3, :, :]
-                if n_channels > 3:
-                    for i in range(3, n_channels):
-                        # Initialize additional channels with the mean of RGB weights
-                        resnet.conv1.weight.data[:, i:i+1, :, :] = first_conv_weights[:, :3, :, :].mean(dim=1, keepdim=True)
-            else:
-                # If input channels < 3, use subset of pretrained weights
-                resnet.conv1.weight.data[:, :n_channels, :, :] = first_conv_weights[:, :n_channels, :, :]
-                
-        # Restore the weights of the first batch norm layer
-        resnet.bn1.weight.data = first_bn_weights['weight']
-        resnet.bn1.bias.data = first_bn_weights['bias']
-        resnet.bn1.running_mean = first_bn_weights['running_mean']
-        resnet.bn1.running_var = first_bn_weights['running_var']
-        
-        # Reset weights of all other layers
-        for name, module in resnet.named_children():
-            if name not in ['conv1', 'bn1']:
-                if isinstance(module, nn.Conv2d) or isinstance(module, nn.Linear) or isinstance(module, nn.BatchNorm2d):
-                    module.reset_parameters()
-        
-        # Remove the final fully connected layer and average pooling
-        self.resnet_features = nn.Sequential(*list(resnet.children())[:-2])
-        
-        # Add a final convolutional layer to get the right number of output channels
-        self.final_conv = nn.Conv2d(512, n_classes, kernel_size=1)
-        
-        # Add upsampling layer to match input spatial dimensions
-        self.upsample = nn.Upsample(scale_factor=32, mode='bilinear' if bilinear else 'nearest', align_corners=True if bilinear else None)
+        # Initialize the first conv layer to handle our custom channel count
+        # Keep the pretrained weights for the first 3 channels if available
+        if hasattr(self.unet.encoder, 'conv1') and hasattr(self.unet.encoder.conv1, 'weight'):
+            with torch.no_grad():
+                if n_channels >= 3:
+                    # Save the original weights for the first three channels
+                    original_weights = self.unet.encoder.conv1.weight.data[:, :3, :, :].clone()
+                    
+                    # Create a new conv layer with the right number of input channels
+                    original_conv = self.unet.encoder.conv1
+                    new_conv = nn.Conv2d(
+                        n_channels, 
+                        original_conv.out_channels,
+                        kernel_size=original_conv.kernel_size,
+                        stride=original_conv.stride,
+                        padding=original_conv.padding,
+                        bias=False if original_conv.bias is None else True
+                    )
+                    
+                    # Copy the weights for the first three channels
+                    new_conv.weight.data[:, :3, :, :] = original_weights
+                    
+                    # Initialize the additional channels with the mean of the RGB weights
+                    if n_channels > 3:
+                        for i in range(3, n_channels):
+                            new_conv.weight.data[:, i:i+1, :, :] = original_weights.mean(dim=1, keepdim=True)
+                    
+                    # If there was a bias, copy it too
+                    if original_conv.bias is not None:
+                        new_conv.bias.data = original_conv.bias.data.clone()
+                    
+                    # Replace the first conv layer
+                    self.unet.encoder.conv1 = new_conv
 
     def forward(self, x):
-        # Extract current solution from input (channel 4)
+        # Extract current solution from input (last channel)
         current_solution = x[:, 5:6, :, :]
         
-        # Pass through ResNet features
-        features = self.resnet_features(x)
+        # Pass through U-Net to get corrections
+        corrections = self.unet(x)
         
-        # Apply final convolution to get the right number of channels
-        corrections = self.final_conv(features)
-        
-        # Upsample back to input resolution
-        corrections = self.upsample(corrections)
-        
-        # Return the updated solution directly (current + correction)
+        # Return the updated solution (current + correction)
         output = current_solution + corrections
 
         return output
 
 
-class ResNetIterative(nn.Module):
+class UNetIterative(nn.Module):
     """
-    A wrapper that applies iterative refinement to any base model.
+    A wrapper that applies iterative refinement to the U-Net model.
     
     The wrapper runs the base model multiple times, adding the current solution
     as the last channel and feeding each prediction back into the input for the next iteration.
@@ -111,9 +96,10 @@ class ResNetIterative(nn.Module):
         
         Args:
             base_model: The model to wrap
+            normalizer: The normalizer to use for denormalizing outputs during inference
             num_iterations: Number of refinement iterations to perform
         """
-        super(ResNetIterative, self).__init__()
+        super(UNetIterative, self).__init__()
         self.base_model = base_model
         self.normalizer = normalizer
         self.num_iterations = num_iterations
@@ -170,5 +156,3 @@ class ResNetIterative(nn.Module):
             output = self.normalizer.denormalize_output(output)
     
         return output
-    
-
