@@ -22,14 +22,6 @@ class PathlossNormalizer:
         self.max_pathloss = max_pathloss
         self.min_antenna_gain = min_antenna_gain
 
-    def free_space_pathloss(self, d_m, freq_hz):
-        c = 3e8  # Speed of light in m/s
-        wavelength = c / freq_hz
-        near_field_threshold = wavelength / (2 * math.pi)
-        d_far = max(d_m, near_field_threshold)
-        fspl_db = 20.0 * math.log10(4.0 * math.pi * d_far * freq_hz / c)
-
-        return fspl_db    
     
     def normalize_input(self, input_tensor):
         """
@@ -89,8 +81,36 @@ class PathlossDataset(Dataset):
         self.training = training
         self.img_size = img_size
         self.normalizer = PathlossNormalizer()
-        self.freqs_Hz = [868, 1800, 3500]
-        
+        self.freqs_MHz = [868, 1800, 3500]
+
+    def compute_pathloss_clamped(
+        self,
+        W, H,
+        x_ant, y_ant,
+        antenna_gain,   # shape=(360,), antenna gain in dBi [0..359]
+        freq_MHz,               # frequency in MHz
+        grid_unit_meters=0.25,  # cell size in meters
+        min_distance_m=0.25,     # clamp distance below this
+    ):
+
+        y_idx, x_idx = np.indices((H, W))
+
+        dx = x_idx - x_ant
+        dy = y_idx - y_ant
+
+        dist_m = np.sqrt(dx*dx + dy*dy) * grid_unit_meters
+        dist_clamped = np.maximum(dist_m, min_distance_m)
+
+        fspl_db = 20.0 * np.log10(dist_clamped) + 20.0 * np.log10(freq_MHz) - 27.55
+
+        if self.img_size != W or self.img_size != H:
+            fspl_db = cv2.resize(fspl_db, (self.img_size, self.img_size), interpolation=cv2.INTER_NEAREST)
+
+        pathloss_db = fspl_db - antenna_gain
+
+        return pathloss_db
+
+
     def __len__(self):
         return len(self.file_list)
     
@@ -130,7 +150,7 @@ class PathlossDataset(Dataset):
         input_img = imread(os.path.join(self.input_path, input_file))
         output_img = imread(os.path.join(self.output_path, output_file))
         
-        freq = self.freqs_Hz[int(f)-1]
+        freq_MHz = self.freqs_MHz[int(f)-1]
         if self.img_size != input_img.shape[0]:
             input_img = cv2.resize(input_img, (self.img_size, self.img_size), interpolation=cv2.INTER_NEAREST)
             output_img = cv2.resize(output_img, (self.img_size, self.img_size), interpolation=cv2.INTER_CUBIC)
@@ -141,7 +161,8 @@ class PathlossDataset(Dataset):
         y_grid = np.repeat(np.linspace(0, H-1, self.img_size), self.img_size, axis=0).reshape(self.img_size, self.img_size)
         
         angles = -(180/np.pi) * np.arctan2((y_ant - y_grid), (x_ant - x_grid)) + 180 + sampling_positions['Azimuth'].iloc[int(sp)]
-        angles = np.clip(angles % radiation_pattern.shape[0], 0, radiation_pattern.shape[0]-1).astype(int)
+        angles = np.where(angles >  359, angles - 360 , angles).astype(int)
+        
         antenna_gain = radiation_pattern[angles]
         
         distance = np.sqrt(((x_ant - x_grid) * (W/self.img_size))**2 + ((y_ant - y_grid) * (H/self.img_size))**2)
@@ -151,7 +172,7 @@ class PathlossDataset(Dataset):
         input_tensor[1] = input_img[:, :, 1].astype(np.float32)  # Transmittance (raw uint8)
         input_tensor[2] = distance  # Distance
         input_tensor[3] = antenna_gain  # Raw antenna gain
-        input_tensor[4] = np.full((self.img_size, self.img_size), freq)  # Frequency channel
+        input_tensor[4] = np.full((self.img_size, self.img_size), freq_MHz)  # Frequency channel
         
         # Prepare ground truth pathloss
         output_tensor = output_img.astype(np.float32)
@@ -164,5 +185,62 @@ class PathlossDataset(Dataset):
         if self.training:
             output_tensor = self.normalizer.normalize_output(output_tensor)
 
+        # pl = self.compute_pathloss_clamped(
+        #     W, H, x_ant, y_ant,
+        #     antenna_gain, freq_MHz
+        # )
+
+        # matrix_to_image(pl, output_img)
+
         return input_tensor, output_tensor
+
+
+
+
+
+
+
+
+
+
+
+
+
+def matrix_to_image(*matrices):
+    from time import time
+    import matplotlib.pyplot as plt
+    
+    n = len(matrices)
+    if n < 2:
+        raise ValueError("At least two matrices are required")
+    
+    # First matrix is free space pathloss, second is ground truth
+    free_space_pathloss = matrices[0]
+    ground_truth = matrices[1]
+    
+    # Calculate the difference matrix
+    diff = ground_truth - free_space_pathloss
+    
+    # Create figure with n+1 subplots (n input matrices + 1 diff matrix)
+    fig, axes = plt.subplots(1, n+1, figsize=(5*(n+1), 5))
+    
+    # Plot input matrices
+    titles = ["Free Space Pathloss", "Ground Truth"] + [f"Matrix {i+3}" for i in range(n-2)]
+    cmaps = ['viridis', 'plasma'] + ['inferno'] * (n-2)
+    
+    for i in range(n):
+        im = axes[i].imshow(matrices[i], cmap=cmaps[i])
+        axes[i].set_title(titles[i])
+        fig.colorbar(im, ax=axes[i])
+    
+    # Plot difference matrix
+    im_diff = axes[-1].imshow(diff, cmap='coolwarm')
+    axes[-1].set_title("Diff")
+    fig.colorbar(im_diff, ax=axes[-1])
+    
+    plt.tight_layout()
+    plt.savefig(f"foo/{time()}.png")
+    plt.close()
+    
+    return diff  # Return the diff matrix in case it's needed
 
