@@ -7,7 +7,7 @@ from data_module import PathlossNormalizer
 
 
 class UNetModel(nn.Module):
-    def __init__(self, n_channels=6, n_classes=1, bilinear=True):
+    def __init__(self, n_channels=7, n_classes=1):
         """
         U-Net based model for predicting updates to pathloss map
         
@@ -24,10 +24,10 @@ class UNetModel(nn.Module):
         self.n_channels = n_channels
         self.n_classes = n_classes
 
-        # Load pretrained U-Net with ResNet34 encoder for better feature extraction
+        # Load pretrained U-Net with ResNet18 encoder for better feature extraction
         # We keep pretrained weights for the encoder to leverage transfer learning
         self.unet = smp.Unet(
-            encoder_name="resnet34",        # Use ResNet34 as the encoder backbone
+            encoder_name="resnet18",        # Use ResNet18 as the encoder backbone
             encoder_weights="imagenet",     # Use pretrained weights on ImageNet
             in_channels=n_channels,         # Match our input channels
             classes=n_classes,              # Output one channel for pathloss prediction

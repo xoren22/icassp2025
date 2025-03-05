@@ -19,10 +19,10 @@ from model import UNetModel, UNetIterative
 def main():
     parser = argparse.ArgumentParser(description='Train and evaluate pathloss prediction model')
     parser.add_argument('--gpu', type=int, default=None, help='GPU ID to use (default: auto-select)')
-    parser.add_argument('--batch_size', type=int, default=32, help='Batch size for training')
+    parser.add_argument('--batch_size', type=int, default=8, help='Batch size for training')
     parser.add_argument('--epochs', type=int, default=200, help='Number of epochs to train')
     parser.add_argument('--lr', type=float, default=3e-4, help='Learning rate')
-    parser.add_argument('--img_size', type=int, default=256, help='Image size')
+    parser.add_argument('--img_size', type=int, default=640, help='Image size')
     parser.add_argument('--iterations', type=int, default=3, help='Number of refinement iterations')
     parser.add_argument('--use_mixed_precision', action='store_true', help='Use mixed precision training')
     parser.add_argument('--data_dir', type=str, default='data', help='Data directory')
@@ -129,7 +129,7 @@ def main():
     test_loader = DataLoader(test_dataset, batch_size=1, shuffle=False, num_workers=1)
     
     # Initialize base model
-    base_model = UNetModel(n_channels=6, n_classes=1, bilinear=True).to(device)
+    base_model = UNetModel().to(device)
     
     # Initialize the iterative refinement wrapper model
     model = UNetIterative(
@@ -175,8 +175,9 @@ def main():
     results = []
     trained_model.eval()
     with torch.no_grad():
-        for inputs, targets in test_loader:
+        for inputs, targets, masks in test_loader:
             inputs = inputs.to(device)
+            masks = masks.to(device)
             targets = targets.to(device)
             
             # Get predictions - taking only the final iteration

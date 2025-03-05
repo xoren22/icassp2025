@@ -9,14 +9,23 @@ from torch.amp import autocast, GradScaler
 # Set environment variable for expandable segments
 os.environ['PYTORCH_CUDA_ALLOC_CONF'] = 'expandable_segments:True'
 
+import torch
+import torch.nn as nn
+import torch
+
 class RMSELoss(nn.Module):
-    """Root Mean Square Error loss function"""
+    """Root Mean Square Error loss function with masking."""
     def __init__(self):
         super(RMSELoss, self).__init__()
-        self.mse = nn.MSELoss()
-        
-    def forward(self, pred, target):
-        return torch.sqrt(self.mse(pred, target))
+
+    def forward(self, pred, target, mask):
+        squared_error = (pred - target)**2
+
+        squared_error = squared_error * mask
+        mse = squared_error.sum() / mask.sum()
+
+        return torch.sqrt(mse)
+
 
 
 def evaluate_iterative_model(model, data_loader, criterion=None, device=None):
@@ -40,8 +49,9 @@ def evaluate_iterative_model(model, data_loader, criterion=None, device=None):
     num_samples = 0
     
     with torch.no_grad():
-        for inputs, targets in data_loader:
+        for inputs, targets, masks in data_loader:
             inputs = inputs.to(device)
+            masks = masks.to(device)
             targets = targets.to(device)
             
             # Forward pass with return_all_iterations=False to get only the final prediction
@@ -52,7 +62,7 @@ def evaluate_iterative_model(model, data_loader, criterion=None, device=None):
                 # Default to RMSE if no criterion provided
                 loss = torch.sqrt(torch.mean((predictions - targets)**2))
             else:
-                loss = criterion(predictions, targets)
+                loss = criterion(predictions, targets, masks)
             
             # Accumulate loss
             batch_size = targets.size(0)
@@ -114,8 +124,9 @@ def train_model(model, train_loader, val_loader, criterion, optimizer, scheduler
             batch_count = len(train_loader)
             log_interval = max(1, batch_count // 10)  # Log approximately 10 times per epoch
             
-            for batch_idx, (inputs, targets) in enumerate(tqdm(train_loader)):
+            for batch_idx, (inputs, targets, mask) in enumerate(tqdm(train_loader)):
                 inputs = inputs.to(device)
+                mask = mask.to(device)
                 targets = targets.to(device)
                 
                 # Zero the parameter gradients
@@ -130,7 +141,7 @@ def train_model(model, train_loader, val_loader, criterion, optimizer, scheduler
                     loss = 0
                     # Calculate loss for each iteration step
                     for i in range(all_predictions.shape[0]):
-                        step_loss = criterion(all_predictions[i], targets)
+                        step_loss = criterion(all_predictions[i], targets, mask)
                         loss += step_loss
                     
                     # Average the loss over all iterations
@@ -157,7 +168,7 @@ def train_model(model, train_loader, val_loader, criterion, optimizer, scheduler
                     print(f'  Batch {batch_idx + 1}/{batch_count} - RMSE: {current_loss:.4f}, Avg RMSE: {avg_loss:.4f}')
                 
                 # Log the final iteration loss separately for monitoring
-                final_loss = criterion(all_predictions[-1], targets).item()
+                final_loss = criterion(all_predictions[-1], targets, mask).item()
                 if (batch_idx + 1) % log_interval == 0 or (batch_idx + 1) == batch_count:
                     print(f'  Final Iteration RMSE: {final_loss:.4f}')
                 
