@@ -1,20 +1,18 @@
 import os
 import argparse
 import numpy as np
+from datetime import datetime
 import torch
-import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import DataLoader
-import gc
 
-# Import custom modules
 from data_module import PathlossDataset, PathlossNormalizer
 from train_module import train_model, evaluate_iterative_model
 from visualization import visualize_results
 from logger import TrainingLogger
 
-# Import the new iterative model wrapper
 from model import UNetModel, UNetIterative
+
 
 def main():
     parser = argparse.ArgumentParser(description='Train and evaluate pathloss prediction model')
@@ -47,8 +45,8 @@ def main():
     # Define paths
     BASE_DIR = os.path.dirname(os.path.abspath(__file__))
     DATA_DIR = os.path.join(BASE_DIR, args.data_dir)
-    INPUT_PATH = os.path.join(DATA_DIR, "Inputs/Task_3_ICASSP/")
-    OUTPUT_PATH = os.path.join(DATA_DIR, "Outputs/Task_3_ICASSP/")
+    INPUT_PATH = os.path.join(DATA_DIR, "Inputs/Task_1_ICASSP/")
+    OUTPUT_PATH = os.path.join(DATA_DIR, "Outputs/Task_1_ICASSP/")
     POSITIONS_PATH = os.path.join(DATA_DIR, "Positions/")
     BUILDING_DETAILS_PATH = os.path.join(DATA_DIR, "Building_Details/")
     RADIATION_PATTERNS_PATH = os.path.join(DATA_DIR, "Radiation_Patterns/")
@@ -59,9 +57,6 @@ def main():
     # Create necessary directories
     for dir_path in [MODEL_SAVE_PATH, LOG_DIR, PLOT_DIR]:
         os.makedirs(dir_path, exist_ok=True)
-    
-    # Initialize logger
-    logger = TrainingLogger(log_dir=LOG_DIR)
     
     # Create list of file IDs (b, ant, f, sp)
     file_list = []
@@ -132,10 +127,11 @@ def main():
     base_model = UNetModel().to(device)
     
     # Initialize the iterative refinement wrapper model
+    normalizer = PathlossNormalizer()
     model = UNetIterative(
         base_model, 
         num_iterations=args.iterations,
-        normalizer=PathlossNormalizer()
+        normalizer=normalizer,
     ).to(device)
     
     # Print model summary
@@ -158,6 +154,9 @@ def main():
         except ImportError:
             print("Mixed precision training not available, using standard precision")
             args.use_mixed_precision = False
+
+    log_dir = os.path.join(LOG_DIR, datetime.now().strftime("%Y-%m-%d_%H:%M"))
+    logger = TrainingLogger(log_root=LOG_DIR, scale_factor=(normalizer.max_pathloss - normalizer.min_pathloss))
     
     # Train model
     trained_model = train_model(

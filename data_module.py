@@ -1,11 +1,12 @@
 import os
-import cv2
-import math
 import torch
 import numpy as np
 import pandas as pd
+from numba import njit
 from skimage.io import imread
 from torch.utils.data import Dataset
+
+from utils import matrix_to_image, measure_time
 
 
 class PathlossNormalizer:
@@ -64,6 +65,86 @@ class PathlossNormalizer:
         return (y + 1.0) / 2.0 * (self.max_pathloss - self.min_pathloss) + self.min_pathloss
 
 
+
+@njit
+def calculate_transmittance_loss(energy_matrix, x_ant, y_ant, n_angles=360*128, radial_step=1.0, max_walls=10):
+    """
+    Approximate the loss from an antenna at (x_ant, y_ant) to every pixel in 'energy_matrix'
+    using a polar (angle + radial stepping) algorithm.
+    
+    If two or more consecutive pixels on the same radial line have the same transmittance value, we only subtract it once.
+    
+    Stops calculation on a ray after encountering max_walls distinct wall values.
+    """
+    h, w = energy_matrix.shape
+    dtheta = 2.0 * np.pi / n_angles
+    output = np.zeros((h, w), dtype=energy_matrix.dtype)  # Initialize with zeros
+    
+    cos_vals = np.cos(np.arange(n_angles) * dtheta)
+    sin_vals = np.sin(np.arange(n_angles) * dtheta)
+    
+    max_dist = np.sqrt(w*w + h*h)
+    
+    for i in range(n_angles):
+        cos_t = cos_vals[i]
+        sin_t = sin_vals[i]
+        
+        sum_loss = 0.0
+        last_val = None  # Start with None to ensure first pixel is always properly processed
+        wall_count = 0
+        
+        r = 0.0
+        while r <= max_dist:
+            x = x_ant + r * cos_t
+            y = y_ant + r * sin_t
+            
+            px = int(round(x))
+            py = int(round(y))
+            
+            if px < 0 or px >= w or py < 0 or py >= h:
+                break
+            
+            val = energy_matrix[py, px]
+            
+            # First pixel handling
+            if last_val is None:
+                last_val = val
+            
+            if val != last_val and val > 0:  # Only count non-zero values as walls
+                sum_loss += val
+                last_val = val
+                wall_count += 1
+                
+                if wall_count >= max_walls:
+                    r_temp = r + radial_step
+                    while r_temp <= max_dist:
+                        x_temp = x_ant + r_temp * cos_t
+                        y_temp = y_ant + r_temp * sin_t
+                        
+                        px_temp = int(round(x_temp))
+                        py_temp = int(round(y_temp))
+                        
+                        if px_temp < 0 or px_temp >= w or py_temp < 0 or py_temp >= h:
+                            break
+                        
+                        if output[py_temp, px_temp] == 0 or sum_loss < output[py_temp, px_temp]:
+                            output[py_temp, px_temp] = sum_loss
+                            
+                        r_temp += radial_step
+                    break
+            elif val != last_val:
+                last_val = val
+            
+            if output[py, px] == 0 or (sum_loss < output[py, px]):
+                output[py, px] = sum_loss
+                
+            r += radial_step
+    
+    return output
+
+# compiling numba function for better performance
+calculate_transmittance_loss(np.array([[1]]), 0, 0)
+
 class PathlossDataset(Dataset):
     """
     Pads input/output to 640 x 640 and returns a mask indicating the valid region.
@@ -100,7 +181,7 @@ class PathlossDataset(Dataset):
     def __len__(self):
         return len(self.file_list)
 
-    def compute_pathloss_clamped(
+    def calculate_pathloss(
         self,
         W,
         H,
@@ -177,20 +258,42 @@ class PathlossDataset(Dataset):
         
         # Gains, distances
         antenna_gain = radiation_pattern[angles]
-        distance = np.sqrt((x_ant - x_grid)**2 + (y_ant - y_grid)**2)
 
-        fspl = self.compute_pathloss_clamped(
+        reflectance = input_img[:, :, 0].astype(np.float32)
+        transmittance = input_img[:, :, 1].astype(np.float32)
+        distance = input_img[:, :, 2].astype(np.float32)
+
+
+        free_space_pathloss = self.calculate_pathloss(
             W, H, x_ant, y_ant, antenna_gain, freq_MHz
         )
+
+        # with measure_time():
+        #     transmittance_loss = transmittance_loss(transmittance, x_ant, y_ant)
+
+        transmittance_loss = calculate_transmittance_loss(transmittance, x_ant, y_ant)
+        fs_plus_transmittance_loss = free_space_pathloss + transmittance_loss
+
+
+        # evaluate_fspl(output_img, fs_plus_transmittance_loss)
+        
+        # matrix_to_image(
+        #     output_img, 
+        #     free_space_pathloss, 
+        #     transmittance_loss, 
+        #     fs_plus_transmittance_loss,
+        #     titles=["Free Space Pathloss", "Transmittance Loss", "Free Space + Transmittance"]
+            
+        # )
         
         # Build input tensor: [6, H, W]
         input_tensor = np.zeros((6, H, W), dtype=np.float32)
-        input_tensor[0] = input_img[:, :, 0].astype(np.float32)  # reflectance
-        input_tensor[1] = input_img[:, :, 1].astype(np.float32)  # transmittance
+        input_tensor[0] = reflectance  # reflectance
+        input_tensor[1] =  transmittance # transmittance
         input_tensor[2] = distance # distance
         input_tensor[3] = antenna_gain
         input_tensor[4] = freq_MHz  # constant freq map
-        input_tensor[5] = fspl
+        input_tensor[5] = fs_plus_transmittance_loss
 
         # Ground truth pathloss: [1, H, W]
         output_tensor = output_img.astype(np.float32)[None, ...]  # channel dim
@@ -225,5 +328,7 @@ class PathlossDataset(Dataset):
         mask[:, :H, :W] = True
 
         return padded_input, padded_output, mask
+
+
 
 

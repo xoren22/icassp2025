@@ -1,3 +1,5 @@
+# dirs
+foo/
 data/
 logs/
 plots/
@@ -7,3 +9,5 @@ backups/
 __pycache__/
 inference_outputs/
 
+# files
+tmp.py

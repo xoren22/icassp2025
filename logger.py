@@ -1,110 +1,112 @@
 import os
 import torch
 from torch.utils.tensorboard import SummaryWriter
+from datetime import datetime
 
 class TrainingLogger:
-    """Logging utility for tracking training progress using TensorBoard"""
-    
-    def __init__(self, log_dir='logs'):
+    """
+    A simpler logger for iterative training:
+      - Logs final iteration loss each batch (scaled)
+      - Logs epoch train/val losses on one plot
+      - Logs debug images (input/target/final pred) every N epochs
+    """
+
+    def __init__(self, log_root="logs", scale_factor=160.0, image_log_interval=5):
         """
-        Initialize the logger
-        
         Args:
-            log_dir: Directory to save TensorBoard logs
+            log_root: directory in which to create subdir for new run
+            scale_factor: multiply train losses by this factor to match val scale
+            image_log_interval: only log debug images every N epochs
         """
-        os.makedirs(log_dir, exist_ok=True)
-        self.writer = SummaryWriter(log_dir=log_dir)
-        self.step = 0
+        # Put each run in a time-stamped directory, so old logs remain
+        time_str = datetime.now().strftime('%Y-%m-%d_%H:%M')
+        self.log_dir = os.path.join(log_root, f"run_{time_str}")
+        os.makedirs(self.log_dir, exist_ok=True)
+
+        self.writer = SummaryWriter(log_dir=self.log_dir)
+
+        self.scale_factor = scale_factor
         self.epoch = 0
-    
-    def log_batch(self, batch_idx, batch_size, batch_loss, running_loss, num_batches):
+        self.global_step = 0
+        self.image_log_interval = image_log_interval
+
+        self.debug_samples = None  # (inputs, targets, masks)
+
+    def set_debug_samples(self, inputs, targets, masks):
         """
-        Log metrics for a single batch
-        
-        Args:
-            batch_idx: Current batch index
-            batch_size: Size of the batch
-            batch_loss: Loss for the current batch
-            running_loss: Running average loss
-            num_batches: Total number of batches in epoch
+        Provide a small batch of data (e.g. 5 samples) for visual logging each epoch.
         """
-        # Calculate global step
-        self.step = self.epoch * num_batches + batch_idx
-        
-        # Log batch loss (now RMSE)
-        self.writer.add_scalar('Training/BatchRMSE', batch_loss / batch_size, self.step)
-        self.writer.add_scalar('Training/RunningAvgRMSE', running_loss / ((batch_idx + 1) * batch_size), self.step)
-    
-    def log_epoch(self, train_loss, val_loss, learning_rate=None):
+        self.debug_samples = (inputs, targets, masks)
+
+    def log_batch_loss(self, loss_value, batch_size):
         """
-        Log metrics for a complete epoch
-        
-        Args:
-            train_loss: Training loss for the epoch
-            val_loss: Validation loss for the epoch
-            learning_rate: Current learning rate (optional)
+        Logs the final iteration loss each batch (train) after scaling.
         """
-        # Log train and validation losses together under one tag for easier comparison
-        self.writer.add_scalars('RMSE', {
-            'Train': train_loss,
-            'Validation': val_loss
+        scaled_loss = loss_value * self.scale_factor
+        # e.g. "Train/BatchRMSE" at self.global_step
+        self.writer.add_scalar("Train/BatchRMSE_Scaled", scaled_loss, self.global_step)
+        self.global_step += 1
+
+    def log_epoch_loss(self, train_loss, val_loss, learning_rate=None):
+        """
+        After each epoch, logs scaled train loss & val loss on the same plot.
+        """
+        scaled_train_loss = train_loss * self.scale_factor
+        self.writer.add_scalars("Loss", {
+            "TrainScaled": scaled_train_loss,
+            "Val": val_loss
         }, self.epoch)
-        
-        # Log learning rate separately
+
         if learning_rate is not None:
-            self.writer.add_scalar('LearningRate', learning_rate, self.epoch)
+            self.writer.add_scalar("LearningRate", learning_rate, self.epoch)
+
+    def log_debug_images(self, model, device=None):
+        """
+        Logs input/target/pred for the small debug batch, if set.
+        Logs only final iteration predictions from the model.
+        Called once per epoch; we skip if epoch not a multiple of self.image_log_interval.
+        """
+        if self.debug_samples is None:
+            return
         
-        # Increment epoch counter
+        # Only log every N epochs (default 5)
+        if self.epoch % self.image_log_interval != 0:
+            return
+
+        model.eval()
+        inputs, targets, masks = self.debug_samples
+        if device:
+            inputs = inputs.to(device)
+            targets = targets.to(device)
+            masks = masks.to(device)
+
+        with torch.no_grad():
+            # shape: [num_iterations, B, C, H, W]
+            all_preds = model(inputs)
+            final_preds = all_preds[-1]  # final iteration, shape [B, C, H, W]
+
+        # We'll log up to 5 images from that batch
+        max_images = min(5, final_preds.size(0))
+        for i in range(max_images):
+            # For clarity, we assume single-channel for target/pred
+            inp = inputs[i].cpu()
+            tgt = targets[i].cpu()
+            pred = final_preds[i].cpu()
+
+            # If your input has many channels, pick or transform them as needed.
+            # Here, let's just visualize the first 3 channels of input (if available).
+            self.writer.add_image(f"Debug/Epoch_{self.epoch}/Input_{i}",
+                                  inp[:3], self.epoch) 
+            self.writer.add_image(f"Debug/Epoch_{self.epoch}/Target_{i}",
+                                  tgt, self.epoch)
+            self.writer.add_image(f"Debug/Epoch_{self.epoch}/Pred_{i}",
+                                  pred, self.epoch)
+
+    def on_epoch_end(self):
+        """
+        Called at end of each epoch to increment epoch count
+        """
         self.epoch += 1
-    
-    def log_model(self, model, example_input):
-        """
-        Log model graph and parameters
-        
-        Args:
-            model: PyTorch model
-            example_input: Example input tensor for model visualization
-        """
-        # Log model graph
-        self.writer.add_graph(model, example_input)
-        
-        # Log parameter histograms
-        for name, param in model.named_parameters():
-            self.writer.add_histogram(f'Parameters/{name}', param, self.epoch)
-    
-    def log_image(self, tag, image, step=None):
-        """
-        Log an image to TensorBoard
-        
-        Args:
-            tag: Image name
-            image: Image tensor (C,H,W)
-            step: Step to use (defaults to current epoch)
-        """
-        if step is None:
-            step = self.epoch
-        
-        self.writer.add_image(tag, image, step)
-    
-    def log_images(self, prefix, input_image, target_image, prediction_image, step=None):
-        """
-        Log input, target and prediction images
-        
-        Args:
-            prefix: Prefix for the image tags
-            input_image: Input image tensor
-            target_image: Target image tensor
-            prediction_image: Prediction image tensor
-            step: Step to use (defaults to current epoch)
-        """
-        if step is None:
-            step = self.epoch
-        
-        # Log individual images
-        self.writer.add_image(f'{prefix}/Input', input_image, step)
-        self.writer.add_image(f'{prefix}/Target', target_image, step)
-        self.writer.add_image(f'{prefix}/Prediction', prediction_image, step)
-    
+
     def close(self):
-        """Close the TensorBoard writer"""
         self.writer.close()

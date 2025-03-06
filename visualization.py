@@ -85,39 +85,3 @@ def visualize_results(results, save_dir='plots/'):
     plt.savefig(os.path.join(save_dir, 'rmse_improvement.png'))
     plt.close()
 
-def matrix_to_image(*matrices):
-    from time import time
-    import matplotlib.pyplot as plt
-    
-    n = len(matrices)
-    if n < 2:
-        raise ValueError("At least two matrices are required")
-    
-    # First matrix is free space pathloss, second is ground truth
-    free_space_pathloss = matrices[0]
-    ground_truth = matrices[1]
-    
-    # Calculate the difference matrix
-    diff = ground_truth - free_space_pathloss
-    
-    # Create figure with n+1 subplots (n input matrices + 1 diff matrix)
-    fig, axes = plt.subplots(1, n+1, figsize=(5*(n+1), 5))
-    
-    # Plot input matrices
-    titles = ["Free Space Pathloss", "Ground Truth"] + [f"Matrix {i+3}" for i in range(n-2)]
-    
-    for i in range(n):
-        im = axes[i].imshow(matrices[i], cmap='coolwarm')
-        axes[i].set_title(titles[i])
-        fig.colorbar(im, ax=axes[i])
-    
-    # Plot difference matrix
-    im_diff = axes[-1].imshow(diff, cmap='coolwarm')
-    axes[-1].set_title("Diff")
-    fig.colorbar(im_diff, ax=axes[-1])
-    
-    plt.tight_layout()
-    plt.savefig(f"foo/{time()}.png")
-    plt.close()
-    
-    return diff  # Return the diff matrix in case it's needed
