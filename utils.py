@@ -1,7 +1,12 @@
+import os
 import time
+import torch
 import numpy as np
 import matplotlib.pyplot as plt
 from contextlib import contextmanager
+
+from config import BASE_DIR
+from model import UNetIterative, UNetModel
 
 
 @contextmanager
@@ -50,7 +55,7 @@ def evaluate_fspl(output_img, fspl):
     print("-"*100, "\n\n")
 
 
-def matrix_to_image(*matrices, titles=None):
+def matrix_to_image(*matrices, titles=None, save_path=f"foo/{time.time()}.png"):
     if len(matrices) < 2:
         raise ValueError("At least two matrices are required: 1 ground truth + 1 comparison.")
 
@@ -92,8 +97,39 @@ def matrix_to_image(*matrices, titles=None):
         fig.colorbar(im_diff, ax=axes[i, 2])
 
     plt.tight_layout()
-    plt.savefig(f"foo/{time.time()}.png")
+    plt.savefig(save_path)
     plt.close()
 
     return diffs
 
+def split_data_uniform(files_list, val_ratio=0.25):  
+    building_ids = list(set([f[0] for f in files_list]))
+    np.random.shuffle(building_ids)
+
+    n_buildings_total = len(building_ids)  
+    n_buildings_valid = int(n_buildings_total*val_ratio)
+
+    if n_buildings_total == 0 or n_buildings_valid == 0:
+        raise ValueError(f"Invalid split, total number of buildings: {n_buildings_total}, ratio of validation set: {val_ratio}. Number of validation buildings {n_buildings_valid}")
+    
+    val_buildings = building_ids[:n_buildings_valid]
+    train_buildings = building_ids[n_buildings_valid:]
+
+    val_files = [f for f in files_list if f[0] in val_buildings]
+    train_files = [f for f in files_list if f[0] in train_buildings]
+
+    return train_files, val_files
+
+
+def load_model(weights_path=None, device=None):    
+    base_model = UNetModel()
+    model = UNetIterative(base_model=base_model)
+    if not os.path.isfile(weights_path):
+        weights_path = os.path.join(BASE_DIR, "models/", weights_path)
+        if not os.path.isfile(weights_path):
+            raise ValueError(f"Model weights_path {weights_path} doesn't exist.")
+        model.load_state_dict(torch.load(weights_path))
+    if device:
+        model = model.to(device)
+        
+    return model

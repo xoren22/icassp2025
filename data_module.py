@@ -35,30 +35,18 @@ class PathlossNormalizer:
             Fully normalized input tensor
         """
         normalized = input_tensor.clone()
-
-        # Reflectance & transmittance
         for i in range(2):
             normalized[i] = (normalized[i] / 255.0 - self.mean[i]) / self.std[i]
-        
-        # Log distance
         normalized[2] = np.log10(1 + normalized[2])
-
-        # Antenna gain
         normalized[3] = normalized[3] / self.min_antenna_gain
-
-        # Frequency channel
         normalized[4] = np.log10(normalized[4]) - 1.9  # "magic shift"
-
-        # Free space pathloss channel
-        normalized[5] = 2.0 * ((normalized[5] - self.min_pathloss) / (self.max_pathloss - self.min_pathloss)) - 1.0
+        normalized[5] = self.normalize_output(normalized[5])
 
         return normalized
     
     def normalize_output(self, y):
         """Scale pathloss into [-1, 1]."""
-        if self.max_pathloss > self.min_pathloss:
-            return 2.0 * ((y - self.min_pathloss) / (self.max_pathloss - self.min_pathloss)) - 1.0
-        return y
+        return 2.0 * ((y - self.min_pathloss) / (self.max_pathloss - self.min_pathloss)) - 1.0
     
     def denormalize_output(self, y):
         """Inverse of the above scaling."""
@@ -67,18 +55,18 @@ class PathlossNormalizer:
 
 
 @njit
-def calculate_transmittance_loss(energy_matrix, x_ant, y_ant, n_angles=360*128, radial_step=1.0, max_walls=10):
+def calculate_transmittance_loss(transmittance_matrix, x_ant, y_ant, n_angles=360*128, radial_step=1.0, max_walls=10):
     """
-    Approximate the loss from an antenna at (x_ant, y_ant) to every pixel in 'energy_matrix'
+    Approximate the loss from an antenna at (x_ant, y_ant) to every pixel in 'transmittance_matrix'
     using a polar (angle + radial stepping) algorithm.
     
     If two or more consecutive pixels on the same radial line have the same transmittance value, we only subtract it once.
     
     Stops calculation on a ray after encountering max_walls distinct wall values.
     """
-    h, w = energy_matrix.shape
+    h, w = transmittance_matrix.shape
     dtheta = 2.0 * np.pi / n_angles
-    output = np.zeros((h, w), dtype=energy_matrix.dtype)  # Initialize with zeros
+    output = np.zeros((h, w), dtype=transmittance_matrix.dtype)  # Initialize with zeros
     
     cos_vals = np.cos(np.arange(n_angles) * dtheta)
     sin_vals = np.sin(np.arange(n_angles) * dtheta)
@@ -104,7 +92,7 @@ def calculate_transmittance_loss(energy_matrix, x_ant, y_ant, n_angles=360*128, 
             if px < 0 or px >= w or py < 0 or py >= h:
                 break
             
-            val = energy_matrix[py, px]
+            val = transmittance_matrix[py, px]
             
             # First pixel handling
             if last_val is None:
@@ -145,18 +133,19 @@ def calculate_transmittance_loss(energy_matrix, x_ant, y_ant, n_angles=360*128, 
 # compiling numba function for better performance
 calculate_transmittance_loss(np.array([[1]]), 0, 0)
 
+
 class PathlossDataset(Dataset):
     """
     Pads input/output to 640 x 640 and returns a mask indicating the valid region.
     Includes a free-space pathloss calculation function for future use.
     """
-    def __init__(self, file_list, input_path, output_path, positions_path, 
-                 buildings_path, radiation_path, img_size=640, training=False):
+    def __init__(self, file_list, input_path, positions_path, 
+                 buildings_path, radiation_path, output_path=None, img_size=640, training=False, load_output=True):
         """
         Args:
             file_list: List of file IDs (b, ant, f, sp)
             input_path: Path to input images
-            output_path: Path to ground truth pathloss maps
+            output_path: Path to ground truth pathloss maps. Optional, skipped in inference
             positions_path: Path to antenna positions
             buildings_path: Path to building details
             radiation_path: Path to radiation patterns
@@ -165,6 +154,7 @@ class PathlossDataset(Dataset):
         """
         self.file_list = file_list
         self.input_path = input_path
+        self.load_output = load_output
         self.output_path = output_path
         self.positions_path = positions_path
         self.buildings_path = buildings_path
@@ -222,13 +212,12 @@ class PathlossDataset(Dataset):
         # Check file existence
         if not all([
             os.path.exists(os.path.join(self.input_path, input_file)),
-            os.path.exists(os.path.join(self.output_path, output_file)),
             os.path.exists(os.path.join(self.positions_path, position_file)),
             os.path.exists(os.path.join(self.buildings_path, building_file)),
             os.path.exists(os.path.join(self.radiation_path, radiation_file))
         ]):
             raise ValueError(f"Warning: Some files missing for B{b}_Ant{ant}_f{f}_S{sp}")
-
+        
         # Read data files
         sampling_positions = pd.read_csv(os.path.join(self.positions_path, position_file))
         building_details = pd.read_csv(os.path.join(self.buildings_path, building_file))
@@ -242,7 +231,6 @@ class PathlossDataset(Dataset):
         
         # Load images
         input_img = imread(os.path.join(self.input_path, input_file))   # shape [H, W, channels]
-        output_img = imread(os.path.join(self.output_path, output_file))# shape [H, W]
         freq_MHz = self.freqs_MHz[int(f)-1]
         
         # Load radiation pattern
@@ -295,37 +283,31 @@ class PathlossDataset(Dataset):
         input_tensor[4] = freq_MHz  # constant freq map
         input_tensor[5] = fs_plus_transmittance_loss
 
-        # Ground truth pathloss: [1, H, W]
-        output_tensor = output_img.astype(np.float32)[None, ...]  # channel dim
-
-        # Convert to torch
         input_tensor = torch.from_numpy(input_tensor)
-        output_tensor = torch.from_numpy(output_tensor)
-
-        # Normalize input
         input_tensor = self.normalizer.normalize_input(input_tensor)
-        # Normalize output if training
-        if self.training:
-            output_tensor = self.normalizer.normalize_output(output_tensor)
 
-        # -------------
-        #  PAD TO 640
-        # -------------
-        padH = self.target_size
-        padW = self.target_size
-
+        padH = padW = self.target_size
         if H > padH or W > padW:
             raise ValueError(f"Cannot pad to {padH}: image is bigger ({H}x{W}). Either crop or pick a larger pad size.")
         
         padded_input = torch.zeros((6, padH, padW), dtype=input_tensor.dtype)
-        padded_output = torch.zeros((1, padH, padW), dtype=output_tensor.dtype)
-
         padded_input[:, :H, :W] = input_tensor
-        padded_output[:, :H, :W] = output_tensor
 
         # Create mask for valid region
-        mask = torch.zeros((1, padH, padW), dtype=torch.bool)
-        mask[:, :H, :W] = True
+        mask = torch.zeros((padH, padW), dtype=torch.bool)
+        mask[:H, :W] = True
+
+        if self.load_output:
+            if not output_file or not os.path.exists(os.path.join(self.output_path, output_file)):
+                raise ValueError(f"output_path must be a valid existing path during training. Instead got {output_file!r}")
+            output_img = imread(os.path.join(self.output_path, output_file)) # shape [H, W]
+            output_tensor = torch.from_numpy(output_img.astype(np.float32))
+            padded_output = torch.zeros((padH, padW), dtype=output_tensor.dtype)
+            padded_output[:H, :W] = output_tensor
+            if self.training:
+                output_tensor = self.normalizer.normalize_output(output_tensor)
+        else:
+            padded_output = None
 
         return padded_input, padded_output, mask
 
