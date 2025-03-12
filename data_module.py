@@ -12,15 +12,13 @@ from utils import matrix_to_image, measure_time
 class PathlossNormalizer:
     def __init__(
             self,
-            min_pathloss=0,
-            max_pathloss=160.0,
+            pathloss_scaler=32.0,
             min_antenna_gain=-55.0,
         ):
         # ImageNet stats for the first three channels
         self.mean = [0.485, 0.456, 0.406]
         self.std = [0.229, 0.224, 0.225]
-        self.min_pathloss = min_pathloss
-        self.max_pathloss = max_pathloss
+        self.pathloss_scaler = pathloss_scaler
         self.min_antenna_gain = min_antenna_gain
 
     def normalize_input(self, input_tensor):
@@ -46,11 +44,11 @@ class PathlossNormalizer:
     
     def normalize_output(self, y):
         """Scale pathloss into [-1, 1]."""
-        return 2.0 * ((y - self.min_pathloss) / (self.max_pathloss - self.min_pathloss)) - 1.0
+        return 2.0 * (y / self.pathloss_scaler) - 1.0
     
     def denormalize_output(self, y):
         """Inverse of the above scaling."""
-        return (y + 1.0) / 2.0 * (self.max_pathloss - self.min_pathloss) + self.min_pathloss
+        return (y + 1.0) / 2.0 * self.pathloss_scaler
 
 
 

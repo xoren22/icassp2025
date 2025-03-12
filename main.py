@@ -4,13 +4,13 @@ import argparse
 import torch.optim as optim
 from torch.utils.data import DataLoader
 
+from config import LOG_DIR
 from train_module import RMSELoss
 from logger import TrainingLogger
 from utils import split_data_uniform
 from train_module import train_model
 from data_module import PathlossDataset
 from model import UNetModel, UNetIterative
-
 
 def main():
     parser = argparse.ArgumentParser(description='Train and evaluate pathloss prediction model')
@@ -60,7 +60,9 @@ def main():
                        os.path.exists(os.path.join(OUTPUT_PATH, output_file)):
                         file_list.append((b, ant, f, sp))
 
-    train_files, val_files = file_list, file_list[:2]# split_data_uniform(file_list)
+    logger = TrainingLogger()
+
+    train_files, val_files = split_data_uniform(file_list, split_save_path=os.path.join(logger.log_dir, "train_val_split.pkl"))
     print(f"Train: {len(train_files)}, Validation: {len(val_files)}")
     
     train_dataset = PathlossDataset(
@@ -83,8 +85,8 @@ def main():
         load_output=True, training=False
     )
     
-    train_loader = DataLoader(train_dataset, batch_size=args.batch_size, shuffle=True, num_workers=2)
-    val_loader = DataLoader(val_dataset, batch_size=args.batch_size, shuffle=False, num_workers=2)
+    train_loader = DataLoader(train_dataset, batch_size=args.batch_size, shuffle=True, num_workers=4)
+    val_loader = DataLoader(val_dataset, batch_size=args.batch_size, shuffle=False, num_workers=4)
     
     base_model = UNetModel().to(device)
     model = UNetIterative(base_model).to(device)
@@ -92,7 +94,6 @@ def main():
     criterion = RMSELoss() 
     optimizer = optim.Adam(model.parameters(), lr=args.lr)
     
-    logger = TrainingLogger()
     scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=50, verbose=True)
     
     train_model(

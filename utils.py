@@ -2,6 +2,7 @@ import os
 import time
 import torch
 import numpy as np
+import pickle as pkl
 import matplotlib.pyplot as plt
 from contextlib import contextmanager
 
@@ -57,7 +58,7 @@ def evaluate_fspl(output_img, fspl):
 
 def matrix_to_image(*matrices, titles=None, save_path=None):
     n = abs(int(matrices[1].sum()))
-    save_path = save_path or f"foo/{n}_1.png"
+    save_path = save_path or f"foo/1_{n}.png"
     if len(matrices) < 2:
         raise ValueError("At least two matrices are required: 1 ground truth + 1 comparison.")
 
@@ -98,7 +99,7 @@ def matrix_to_image(*matrices, titles=None, save_path=None):
     return diffs
 
 
-def split_data_uniform(files_list, val_ratio=0.5, seed=None):  
+def split_data_uniform(files_list, val_ratio=0.25, split_save_path=None, seed=None):  
     building_ids = list(set([f[0] for f in files_list]))
     
     np.random.seed(seed=seed)
@@ -115,7 +116,13 @@ def split_data_uniform(files_list, val_ratio=0.5, seed=None):
 
     val_files = [f for f in files_list if f[0] in val_buildings]
     train_files = [f for f in files_list if f[0] in train_buildings]
-
+    if split_save_path:
+        with open(split_save_path, "wb") as f:
+            split_dict = {
+                "val_files": val_files,
+                "train_files": train_files,
+            }
+            pkl.dump(split_dict, f)
     return train_files, val_files
 
 

@@ -4,7 +4,7 @@ import segmentation_models_pytorch as smp
 
 
 class UNetModel(nn.Module):
-    def __init__(self, n_channels=7):
+    def __init__(self, n_channels=6):
         super(UNetModel, self).__init__()
 
         self.unet = smp.Unet( # Load pretrained U-Net with ResNet18 encoder, keep pretrained
@@ -55,19 +55,17 @@ class UNetIterative(nn.Module):
     
     def _rescale_outputs(self, output):
         return (1 + output / 2) * self.output_scale
-        
 
     def forward(self, x):
-        batch_size, channels, height, width = x.shape
-        current_solution = torch.zeros(batch_size, 1, height, width, device=x.device)
-        
+        # We'll store each iteration's prediction in all_predictions
         all_predictions = []
+
+        # Repeatedly call base_model, which expects x's last channel to be the current solution
         for i in range(self.num_iterations):
-            x_with_solution = torch.cat([x, current_solution], dim=1)
-            predicted = self.base_model(x_with_solution)
+            predicted = self.base_model(x)               # base_model forward uses x[:, -1, :, :] as current_solution
             all_predictions.append(predicted)
-            current_solution = predicted
-        
+            x[:, -1, :, :] = predicted[:, 0, :, :]      # Overwrite x's last channel with the new predicted solution
+
         output = torch.cat(all_predictions, dim=1)
         if not self.training:
             output = self._rescale_outputs(output)
