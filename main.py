@@ -14,7 +14,9 @@ from model import UNetModel, UNetIterative
 
 def main():
     parser = argparse.ArgumentParser(description='Train and evaluate pathloss prediction model')
+
     parser.add_argument('--gpu', type=int, default=None, help='GPU ID to use (default: auto-select)')
+    parser.add_argument('--task', type=int, default=2, help='Which task is the training for. Can be 1, 2 or 3')
     parser.add_argument('--batch_size', type=int, default=8, help='Batch size for training')
     parser.add_argument('--epochs', type=int, default=200, help='Number of epochs to train')
     parser.add_argument('--lr', type=float, default=3e-4, help='Learning rate')
@@ -38,8 +40,8 @@ def main():
     # Define paths
     BASE_DIR = os.path.dirname(os.path.abspath(__file__))
     DATA_DIR = os.path.join(BASE_DIR, args.data_dir)
-    INPUT_PATH = os.path.join(DATA_DIR, "Inputs/Task_1_ICASSP/")
-    OUTPUT_PATH = os.path.join(DATA_DIR, "Outputs/Task_1_ICASSP/")
+    INPUT_PATH = os.path.join(DATA_DIR, f"Inputs/Task_{args.task}_ICASSP/")
+    OUTPUT_PATH = os.path.join(DATA_DIR, f"Outputs/Task_{args.task}_ICASSP/")
     POSITIONS_PATH = os.path.join(DATA_DIR, "Positions/")
     BUILDING_DETAILS_PATH = os.path.join(DATA_DIR, "Building_Details/")
     RADIATION_PATTERNS_PATH = os.path.join(DATA_DIR, "Radiation_Patterns/")
@@ -57,8 +59,8 @@ def main():
                     if os.path.exists(os.path.join(INPUT_PATH, input_file)) and \
                        os.path.exists(os.path.join(OUTPUT_PATH, output_file)):
                         file_list.append((b, ant, f, sp))
-    
-    train_files, val_files = split_data_uniform(file_list)
+
+    train_files, val_files = file_list, file_list[:2]# split_data_uniform(file_list)
     print(f"Train: {len(train_files)}, Validation: {len(val_files)}")
     
     train_dataset = PathlossDataset(
@@ -86,7 +88,6 @@ def main():
     
     base_model = UNetModel().to(device)
     model = UNetIterative(base_model).to(device)
-    
     
     criterion = RMSELoss() 
     optimizer = optim.Adam(model.parameters(), lr=args.lr)

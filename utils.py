@@ -55,55 +55,53 @@ def evaluate_fspl(output_img, fspl):
     print("-"*100, "\n\n")
 
 
-def matrix_to_image(*matrices, titles=None, save_path=f"foo/{time.time()}.png"):
+def matrix_to_image(*matrices, titles=None, save_path=None):
+    n = abs(int(matrices[1].sum()))
+    save_path = save_path or f"foo/{n}_1.png"
     if len(matrices) < 2:
         raise ValueError("At least two matrices are required: 1 ground truth + 1 comparison.")
 
     ground_truth = matrices[0]
-    others = matrices[1:]   # comparison matrices
+    others = matrices[1:]
     n = len(others)
-
-    # If no custom titles are provided or the number of titles is off, create default titles
     if not titles or len(titles) != n:
         titles = [f"Matrix {i+1}" for i in range(n)]
 
-    # Create n x 3 subplots
-    fig, axes = plt.subplots(nrows=n, ncols=3, figsize=(15, 5*n))
+    diffs = []
+    for mat in others:
+        diffs.append(np.abs(ground_truth - mat))
 
-    # If there's only one row, 'axes' will be a 1D array; force it to 2D
+    all_mats = [ground_truth] + list(others) + diffs
+    vmin = min(m.min() for m in all_mats)
+    vmax = max(m.max() for m in all_mats)
+
+    fig, axes = plt.subplots(nrows=n, ncols=3, figsize=(15, 5*n))
     if n == 1:
         axes = np.array([axes])
 
-    diffs = []  # Collect difference matrices
-
     for i in range(n):
-        comparison_matrix = others[i]
-        diff = np.abs(ground_truth - comparison_matrix)
-        diffs.append(diff)
-
-        # Ground truth
-        im_gt = axes[i, 0].imshow(ground_truth, cmap='coolwarm')
+        im_gt = axes[i, 0].imshow(ground_truth, cmap='coolwarm', vmin=vmin, vmax=vmax)
         axes[i, 0].set_title("Ground Truth")
         fig.colorbar(im_gt, ax=axes[i, 0])
 
-        # Comparison
-        im_comp = axes[i, 1].imshow(comparison_matrix, cmap='coolwarm')
+        im_cmp = axes[i, 1].imshow(others[i], cmap='coolwarm', vmin=vmin, vmax=vmax)
         axes[i, 1].set_title(titles[i])
-        fig.colorbar(im_comp, ax=axes[i, 1])
+        fig.colorbar(im_cmp, ax=axes[i, 1])
 
-        # Absolute difference
-        im_diff = axes[i, 2].imshow(diff, cmap='coolwarm')
+        im_diff = axes[i, 2].imshow(diffs[i], cmap='coolwarm', vmin=vmin, vmax=vmax)
         axes[i, 2].set_title("Absolute Diff")
         fig.colorbar(im_diff, ax=axes[i, 2])
 
     plt.tight_layout()
     plt.savefig(save_path)
     plt.close()
-
     return diffs
 
-def split_data_uniform(files_list, val_ratio=0.25):  
+
+def split_data_uniform(files_list, val_ratio=0.5, seed=None):  
     building_ids = list(set([f[0] for f in files_list]))
+    
+    np.random.seed(seed=seed)
     np.random.shuffle(building_ids)
 
     n_buildings_total = len(building_ids)  

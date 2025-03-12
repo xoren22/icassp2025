@@ -171,16 +171,16 @@ class PathlossDataset(Dataset):
     def __len__(self):
         return len(self.file_list)
 
-    def calculate_pathloss(
+    def calculate_fspl(
         self,
         W,
         H,
         x_ant,
         y_ant,
-        antenna_gain,       # shape=(360,) antenna gain in dBi [0..359]
-        freq_MHz,           # frequency in MHz
+        antenna_gain,           # shape=(360,) antenna gain in dBi [0..359]
+        freq_MHz,               # frequency in MHz
         grid_unit_meters=0.25,  # cell size in meters
-        min_distance_m=0.25     # clamp distance below this
+        min_distance_m=0.125,     # clamp distance below this
     ):
         """
         Example free-space pathloss calculation with distance clamping.
@@ -190,7 +190,7 @@ class PathlossDataset(Dataset):
         dx = x_idx - x_ant
         dy = y_idx - y_ant
 
-        dist_m = np.sqrt(dx*dx + dy*dy) * grid_unit_meters
+        dist_m = np.sqrt(dx**2 + dy**2) * grid_unit_meters
         dist_clamped = np.maximum(dist_m, min_distance_m)
 
         fspl_db = 20.0 * np.log10(dist_clamped) + 20.0 * np.log10(freq_MHz) - 27.55
@@ -198,18 +198,43 @@ class PathlossDataset(Dataset):
         pathloss_db = fspl_db - antenna_gain
         return pathloss_db
     
+    def pad(self, input_tensor, output_tensor):
+        n_input_channels, H, W = input_tensor.size()
+
+        padH = padW = self.target_size
+        if H > padH or W > padW:
+            raise ValueError(f"Cannot pad to {padH}: image is bigger ({H}x{W}). Either crop or pick a larger pad size.")
+        
+        padded_input = torch.zeros((n_input_channels, padH, padW), dtype=input_tensor.dtype)
+        padded_input[:, :H, :W] = input_tensor
+
+        padded_output = torch.zeros((padH, padW), dtype=output_tensor.dtype)
+        padded_output[:H, :W] = output_tensor
+
+        mask = torch.zeros((padH, padW), dtype=torch.bool)
+        mask[:H, :W] = True
+
+        return padded_input, padded_output, mask
+    
+    def calculate_antenna_gain(self, radiation_pattern, W, H, azimuth, x_ant, y_ant):
+        x_grid = np.repeat(np.linspace(0, W-1, W), H, axis=0).reshape(W, H).T
+        y_grid = np.repeat(np.linspace(0, H-1, H), W, axis=0).reshape(H, W)
+        
+        angles = -(180/np.pi) * np.arctan2((y_ant - y_grid), (x_ant - x_grid)) + 180 + azimuth
+        angles = np.where(angles > 359, angles - 360, angles).astype(int)
+        antenna_gain = radiation_pattern[angles]
+        return antenna_gain
+
+    
     def __getitem__(self, idx):
-        # Parse file info
         b, ant, f, sp = self.file_list[idx]
         
-        # File names
         input_file = f"B{b}_Ant{ant}_f{f}_S{sp}.png"
         output_file = f"B{b}_Ant{ant}_f{f}_S{sp}.png"
         position_file = f"Positions_B{b}_Ant{ant}_f{f}.csv"
         building_file = f"B{b}_Details.csv"
         radiation_file = f"Ant{ant}_Pattern.csv"
         
-        # Check file existence
         if not all([
             os.path.exists(os.path.join(self.input_path, input_file)),
             os.path.exists(os.path.join(self.positions_path, position_file)),
@@ -218,62 +243,31 @@ class PathlossDataset(Dataset):
         ]):
             raise ValueError(f"Warning: Some files missing for B{b}_Ant{ant}_f{f}_S{sp}")
         
-        # Read data files
         sampling_positions = pd.read_csv(os.path.join(self.positions_path, position_file))
         building_details = pd.read_csv(os.path.join(self.buildings_path, building_file))
+        input_img = imread(os.path.join(self.input_path, input_file))   # shape [H, W, channels]
+        radiation_pattern = np.genfromtxt(os.path.join(self.radiation_path, radiation_file), delimiter=',')
         
-        # Building dimensions
-        W, H = building_details["W"].iloc[0], building_details["H"].iloc[0]
+        freq_MHz = self.freqs_MHz[int(f)-1]
+        x_min, x_max, y_min, y_max, W, H = building_details.iloc[0].astype(int).to_list()
         
-        # Get antenna position
         x_ant = sampling_positions["Y"].loc[int(sp)]
         y_ant = sampling_positions["X"].loc[int(sp)]
-        
-        # Load images
-        input_img = imread(os.path.join(self.input_path, input_file))   # shape [H, W, channels]
-        freq_MHz = self.freqs_MHz[int(f)-1]
-        
-        # Load radiation pattern
-        radiation_pattern = np.genfromtxt(os.path.join(self.radiation_path, radiation_file), delimiter=',')
+        azimuth = sampling_positions['Azimuth'].iloc[int(sp)]
 
-        # Compute angle map
-        x_grid = np.repeat(np.linspace(0, W-1, W), H, axis=0).reshape(W, H).T
-        y_grid = np.repeat(np.linspace(0, H-1, H), W, axis=0).reshape(H, W)
-        
-        angles = -(180/np.pi) * np.arctan2((y_ant - y_grid), (x_ant - x_grid)) \
-                 + 180 + sampling_positions['Azimuth'].iloc[int(sp)]
-        angles = np.where(angles > 359, angles - 360, angles).astype(int)
-        
-        # Gains, distances
-        antenna_gain = radiation_pattern[angles]
+        antenna_gain = self.calculate_antenna_gain(radiation_pattern, W, H, azimuth, x_ant, y_ant)
 
         reflectance = input_img[:, :, 0].astype(np.float32)
         transmittance = input_img[:, :, 1].astype(np.float32)
         distance = input_img[:, :, 2].astype(np.float32)
 
-
-        free_space_pathloss = self.calculate_pathloss(
+        free_space_pathloss = self.calculate_fspl(
             W, H, x_ant, y_ant, antenna_gain, freq_MHz
         )
-
-        # with measure_time():
-        #     transmittance_loss = transmittance_loss(transmittance, x_ant, y_ant)
 
         transmittance_loss = calculate_transmittance_loss(transmittance, x_ant, y_ant)
         fs_plus_transmittance_loss = free_space_pathloss + transmittance_loss
 
-
-        # evaluate_fspl(output_img, fs_plus_transmittance_loss)
-        
-        # matrix_to_image(
-        #     output_img, 
-        #     free_space_pathloss, 
-        #     transmittance_loss, 
-        #     fs_plus_transmittance_loss,
-        #     titles=["Free Space Pathloss", "Transmittance Loss", "Free Space + Transmittance"]
-            
-        # )
-        
         # Build input tensor: [6, H, W]
         input_tensor = np.zeros((6, H, W), dtype=np.float32)
         input_tensor[0] = reflectance  # reflectance
@@ -283,33 +277,32 @@ class PathlossDataset(Dataset):
         input_tensor[4] = freq_MHz  # constant freq map
         input_tensor[5] = fs_plus_transmittance_loss
 
+        # matrix_to_image(
+        #     imread(os.path.join(self.output_path, output_file)),
+        #     fs_plus_transmittance_loss,
+        # )
+
         input_tensor = torch.from_numpy(input_tensor)
         input_tensor = self.normalizer.normalize_input(input_tensor)
 
-        padH = padW = self.target_size
-        if H > padH or W > padW:
-            raise ValueError(f"Cannot pad to {padH}: image is bigger ({H}x{W}). Either crop or pick a larger pad size.")
-        
-        padded_input = torch.zeros((6, padH, padW), dtype=input_tensor.dtype)
-        padded_input[:, :H, :W] = input_tensor
 
-        # Create mask for valid region
-        mask = torch.zeros((padH, padW), dtype=torch.bool)
-        mask[:H, :W] = True
 
         if self.load_output:
             if not output_file or not os.path.exists(os.path.join(self.output_path, output_file)):
                 raise ValueError(f"output_path must be a valid existing path during training. Instead got {output_file!r}")
             output_img = imread(os.path.join(self.output_path, output_file)) # shape [H, W]
             output_tensor = torch.from_numpy(output_img.astype(np.float32))
-            padded_output = torch.zeros((padH, padW), dtype=output_tensor.dtype)
-            padded_output[:H, :W] = output_tensor
             if self.training:
                 output_tensor = self.normalizer.normalize_output(output_tensor)
-        else:
-            padded_output = None
+
+        padded_input, padded_output, mask = self.pad(
+            input_tensor=input_tensor,
+            output_tensor=output_tensor,
+        )
 
         return padded_input, padded_output, mask
+
+
 
 
 
