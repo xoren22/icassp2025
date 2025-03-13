@@ -5,12 +5,12 @@ import torch.optim as optim
 from torch.utils.data import DataLoader
 
 from config import LOG_DIR
+from model import UNetModel
 from train_module import RMSELoss
 from logger import TrainingLogger
 from utils import split_data_uniform
 from train_module import train_model
 from data_module import PathlossDataset
-from model import UNetModel, UNetIterative
 
 def main():
     parser = argparse.ArgumentParser(description='Train and evaluate pathloss prediction model')
@@ -29,7 +29,7 @@ def main():
     if args.gpu is not None:
         device = torch.device(f"cuda:{args.gpu}" if torch.cuda.is_available() else "cpu")
     else:
-        device = torch.device("cuda:1" if torch.cuda.is_available() else "cpu")
+        device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
     
     print(f"Using device: {device}")
     
@@ -88,8 +88,7 @@ def main():
     train_loader = DataLoader(train_dataset, batch_size=args.batch_size, shuffle=True, num_workers=4)
     val_loader = DataLoader(val_dataset, batch_size=args.batch_size, shuffle=False, num_workers=4)
     
-    base_model = UNetModel().to(device)
-    model = UNetIterative(base_model).to(device)
+    model = UNetModel().to(device)
     
     criterion = RMSELoss() 
     optimizer = optim.Adam(model.parameters(), lr=args.lr)

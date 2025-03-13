@@ -6,14 +6,15 @@ from numba import njit
 from skimage.io import imread
 from torch.utils.data import Dataset
 
+from config import OUTPUT_SCALER
 from utils import matrix_to_image, measure_time
 
 
 class PathlossNormalizer:
     def __init__(
             self,
-            pathloss_scaler=32.0,
             min_antenna_gain=-55.0,
+            pathloss_scaler=OUTPUT_SCALER,
         ):
         # ImageNet stats for the first three channels
         self.mean = [0.485, 0.456, 0.406]

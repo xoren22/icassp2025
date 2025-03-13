@@ -7,7 +7,7 @@ import matplotlib.pyplot as plt
 from contextlib import contextmanager
 
 from config import BASE_DIR
-from model import UNetIterative, UNetModel
+from model import UNetModel
 
 
 @contextmanager
@@ -127,8 +127,7 @@ def split_data_uniform(files_list, val_ratio=0.25, split_save_path=None, seed=No
 
 
 def load_model(weights_path=None, device=None):    
-    base_model = UNetModel()
-    model = UNetIterative(base_model=base_model)
+    model = UNetModel()
     if not os.path.isfile(weights_path):
         weights_path = os.path.join(BASE_DIR, "models/", weights_path)
         if not os.path.isfile(weights_path):
