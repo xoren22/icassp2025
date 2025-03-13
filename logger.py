@@ -27,18 +27,25 @@ class TrainingLogger:
         self.global_step += 1
 
     def log_epoch_loss(self, val_epoch_loss, epoch, learning_rate=None):
-
-        epoch_training_loss = (self.train_batch_se_sum / self.train_batch_mask_sum)**0.5
+        epoch_training_loss = (self.train_batch_se_sum / (self.train_batch_mask_sum + 1e-8))**0.5
         epoch_training_loss_scaled = epoch_training_loss * OUTPUT_SCALER
 
         self.train_batch_se_sum = 0.0
         self.train_batch_mask_sum = 0
 
-        self.writer.add_scalar("epoch_validation_loss", val_epoch_loss, epoch)
-        self.writer.add_scalar("epoch_training_loss", epoch_training_loss_scaled, epoch)
+        # Use add_scalars so both series appear on the same chart
+        self.writer.add_scalars(
+            "epoch_rmse",
+            {
+                "training": epoch_training_loss_scaled,
+                "validation": val_epoch_loss
+            },
+            epoch
+        )
 
         if learning_rate is not None:
             self.writer.add_scalar("lr", learning_rate, epoch)
 
-    def close(self):
-        self.writer.close()
+
+        def close(self):
+            self.writer.close()
