@@ -98,10 +98,21 @@ def matrix_to_image(*matrices, titles=None, save_path=None):
     plt.close()
     return diffs
 
+def load_model(weights_path=None, device=None):    
+    model = UNetModel()
+    if not os.path.isfile(weights_path):
+        weights_path = os.path.join(BASE_DIR, "models/", weights_path)
+        if not os.path.isfile(weights_path):
+            raise ValueError(f"Model weights_path {weights_path} doesn't exist.")
+        model.load_state_dict(torch.load(weights_path))
+    if device:
+        model = model.to(device)
+        
+    return model
 
-def split_data_uniform(files_list, val_ratio=0.25, split_save_path=None, seed=None):  
+
+def split_data_task1(files_list, val_ratio=0.25, split_save_path=None, seed=None):
     building_ids = list(set([f[0] for f in files_list]))
-    
     np.random.seed(seed=seed)
     np.random.shuffle(building_ids)
 
@@ -114,8 +125,12 @@ def split_data_uniform(files_list, val_ratio=0.25, split_save_path=None, seed=No
     val_buildings = building_ids[:n_buildings_valid]
     train_buildings = building_ids[n_buildings_valid:]
 
-    val_files = [f for f in files_list if f[0] in val_buildings]
-    train_files = [f for f in files_list if f[0] in train_buildings]
+    val_files, train_files = [], []
+    for f in files_list:
+        if f[0] in val_buildings:
+            val_files.append(f)
+        else:
+            train_files.append(f)
     if split_save_path:
         with open(split_save_path, "wb") as f:
             split_dict = {
@@ -126,14 +141,36 @@ def split_data_uniform(files_list, val_ratio=0.25, split_save_path=None, seed=No
     return train_files, val_files
 
 
-def load_model(weights_path=None, device=None):    
-    model = UNetModel()
-    if not os.path.isfile(weights_path):
-        weights_path = os.path.join(BASE_DIR, "models/", weights_path)
-        if not os.path.isfile(weights_path):
-            raise ValueError(f"Model weights_path {weights_path} doesn't exist.")
-        model.load_state_dict(torch.load(weights_path))
-    if device:
-        model = model.to(device)
-        
-    return model
+
+def split_data_task2(files_list, val_freqs, split_save_path=None):
+    val_freqs = val_freqs if isinstance(val_freqs, list) else [val_freqs]
+
+    train, val = [], []
+    for f in files_list:
+        if f[2] in val_freqs:
+            val.append(f)
+        else:
+            train.append(f)
+    if split_save_path:
+        with open(split_save_path, "wb") as fp:
+            pkl.dump({"train_files": train, "val_files": val,
+                      "val_freqs": val_freqs}, fp)
+    return train, val
+
+def split_data_task3(files_list, val_freqs, val_antennas, split_save_path=None):
+    val_freqs = val_freqs if isinstance(val_freqs, list) else [val_freqs]
+    val_antennas = val_antennas if isinstance(val_antennas, list) else [val_antennas]
+
+    train, val = [], []
+    for f in files_list:
+        if f[2] in val_freqs or f[1] in val_antennas:
+            val.append(f)
+        else:
+            train.append(f)
+    if split_save_path:
+        with open(split_save_path, "wb") as fp:
+            pkl.dump({"train_files": train, "val_files": val,
+                      "val_freqs": val_freqs,
+                      "val_antennas": val_antennas}, fp)
+    return train, val
+

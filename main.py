@@ -6,7 +6,7 @@ from torch.utils.data import DataLoader
 
 from model import UNetModel
 from logger import TrainingLogger
-from utils import split_data_uniform
+from utils import split_data_task2
 from train_module import train_model
 from data_module import PathlossDataset
 
@@ -15,7 +15,6 @@ def main():
     parser = argparse.ArgumentParser(description='Train and evaluate pathloss prediction model')
 
     parser.add_argument('--gpu', type=int, default=None, help='GPU ID to use (default: auto-select)')
-    parser.add_argument('--task', type=int, default=2, help='Which task is the training for. Can be 1, 2 or 3')
     parser.add_argument('--batch_size', type=int, default=8, help='Batch size for training')
     parser.add_argument('--epochs', type=int, default=200, help='Number of epochs to train')
     parser.add_argument('--lr', type=float, default=3e-4, help='Learning rate')
@@ -39,8 +38,8 @@ def main():
     # Define paths
     BASE_DIR = os.path.dirname(os.path.abspath(__file__))
     DATA_DIR = os.path.join(BASE_DIR, args.data_dir)
-    INPUT_PATH = os.path.join(DATA_DIR, f"Inputs/Task_{args.task}_ICASSP/")
-    OUTPUT_PATH = os.path.join(DATA_DIR, f"Outputs/Task_{args.task}_ICASSP/")
+    INPUT_PATH = os.path.join(DATA_DIR, f"Inputs/Task_2_ICASSP/")
+    OUTPUT_PATH = os.path.join(DATA_DIR, f"Outputs/Task_2_ICASSP/")
     POSITIONS_PATH = os.path.join(DATA_DIR, "Positions/")
     BUILDING_DETAILS_PATH = os.path.join(DATA_DIR, "Building_Details/")
     RADIATION_PATTERNS_PATH = os.path.join(DATA_DIR, "Radiation_Patterns/")
@@ -61,7 +60,8 @@ def main():
 
     logger = TrainingLogger()
 
-    train_files, val_files = split_data_uniform(file_list, split_save_path=os.path.join(logger.log_dir, "train_val_split.pkl"))
+    split_save_path=os.path.join(logger.log_dir, "train_val_split.pkl")
+    train_files, val_files = split_data_task2(file_list, val_freqs=3, split_save_path=split_save_path)
     print(f"Train: {len(train_files)}, Validation: {len(val_files)}")
     
     train_dataset = PathlossDataset(
