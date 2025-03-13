@@ -15,25 +15,27 @@ class TrainingLogger:
         self.global_step = 0
         self.writer = SummaryWriter(log_dir=self.log_dir)
 
-        self.epoch_train_loss_sum = 0.0
-        self.epoch_train_steps_sum = 0
+        self.train_batch_se_sum = 0.0
+        self.train_batch_mask_sum = 0.0
 
-    def log_batch_loss(self, loss_values, batch_size):
-        val = loss_values
-        self.writer.add_scalar("batch_loss", val, self.global_step)
-        self.epoch_train_loss_sum += val * batch_size
-        self.epoch_train_steps_sum += batch_size
+    def log_batch_loss(self, se_sum, mask_sum):
+        self.train_batch_se_sum += se_sum
+        self.train_batch_mask_sum += mask_sum
+
+        batch_mse = se_sum / mask_sum
+        self.writer.add_scalar("batch_mse", batch_mse, self.global_step)
         self.global_step += 1
 
-    def log_epoch_loss(self, val_iteration_loss, epoch, learning_rate=None):
-        total_loss_scaled = self.epoch_train_loss_sum * OUTPUT_SCALER
-        avg_loss = total_loss_scaled / self.epoch_train_steps_sum if self.epoch_train_steps_sum > 0 else float("inf")
+    def log_epoch_loss(self, val_epoch_loss, epoch, learning_rate=None):
 
-        self.epoch_train_loss_sum = 0.0
-        self.epoch_train_steps_sum = 0
+        epoch_training_loss = (self.train_batch_se_sum / self.train_batch_mask_sum)**0.5
+        epoch_training_loss_scaled = epoch_training_loss * OUTPUT_SCALER
 
-        self.writer.add_scalar("epoch_loss_training", avg_loss, epoch)
-        self.writer.add_scalar("epoch_loss_validation", val_iteration_loss, epoch)
+        self.train_batch_se_sum = 0.0
+        self.train_batch_mask_sum = 0
+
+        self.writer.add_scalar("epoch_validation_loss", val_epoch_loss, epoch)
+        self.writer.add_scalar("epoch_training_loss", epoch_training_loss_scaled, epoch)
 
         if learning_rate is not None:
             self.writer.add_scalar("lr", learning_rate, epoch)

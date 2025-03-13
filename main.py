@@ -4,13 +4,12 @@ import argparse
 import torch.optim as optim
 from torch.utils.data import DataLoader
 
-from config import LOG_DIR
 from model import UNetModel
-from train_module import RMSELoss
 from logger import TrainingLogger
 from utils import split_data_uniform
 from train_module import train_model
 from data_module import PathlossDataset
+
 
 def main():
     parser = argparse.ArgumentParser(description='Train and evaluate pathloss prediction model')
@@ -90,14 +89,19 @@ def main():
     
     model = UNetModel().to(device)
     
-    criterion = RMSELoss() 
-    optimizer = optim.Adam(model.parameters(), lr=args.lr)
-    
+    optimizer = optim.Adam(model.parameters(), lr=args.lr)    
     scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=50, verbose=True)
     
     train_model(
-        model, train_loader, val_loader, criterion, optimizer, scheduler,
-        num_epochs=args.epochs, logger=logger, device=device, save_dir=MODEL_SAVE_PATH
+        model=model, 
+        train_loader=train_loader, 
+        val_loader=val_loader, 
+        optimizer=optimizer, 
+        scheduler=scheduler,
+        num_epochs=args.epochs, 
+        logger=logger, 
+        device=device, 
+        save_dir=MODEL_SAVE_PATH,
     )
    
     logger.close()

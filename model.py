@@ -2,10 +2,14 @@ import torch
 import torch.nn as nn
 import segmentation_models_pytorch as smp
 
+from config import OUTPUT_SCALER
+
+
 class UNetModel(nn.Module):
-    def __init__(self, n_channels=6):
+    def __init__(self, n_channels=6, output_scale=OUTPUT_SCALER):
         super(UNetModel, self).__init__()
 
+        self.output_scale = output_scale
         self.unet = smp.Unet(
             encoder_name="resnet18",
             encoder_weights="imagenet",
@@ -42,6 +46,11 @@ class UNetModel(nn.Module):
 
                 self.unet.encoder.conv1 = new_conv
 
+    def _rescale_outputs(self, output):
+        return (1 + output / 2) * self.output_scale
+
     def forward(self, x):
         output = self.unet(x).squeeze(1)
+        if not self.training:
+            output = self._rescale_outputs(output)
         return output
