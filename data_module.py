@@ -4,6 +4,7 @@ import numpy as np
 import pandas as pd
 from numba import njit
 from skimage.io import imread
+from skimage.transform import rotate
 from torch.utils.data import Dataset
 
 from config import OUTPUT_SCALER
@@ -231,7 +232,13 @@ class PathlossDataset(Dataset):
         angles = np.where(angles > 359, angles - 360, angles).astype(int)
         antenna_gain = radiation_pattern[angles]
         return antenna_gain
+    
 
+    def rotate_and_crop(self, input_img, output_img):
+        k = np.random.randint(0, 3)  # 0 -> 0°, 1 -> 90°, 2 -> 180°, 3 -> 270°
+        output_rot = torch.rot90(output_img, k)
+        input_rot = torch.rot90(input_img, k, [1, 2])
+        return input_rot, output_rot
     
     def __getitem__(self, idx):
         b, ant, f, sp = self.file_list[idx]
@@ -252,9 +259,12 @@ class PathlossDataset(Dataset):
         
         sampling_positions = pd.read_csv(os.path.join(self.positions_path, position_file))
         building_details = pd.read_csv(os.path.join(self.buildings_path, building_file))
-        input_img = imread(os.path.join(self.input_path, input_file))   # shape [H, W, channels]
         radiation_pattern = np.genfromtxt(os.path.join(self.radiation_path, radiation_file), delimiter=',')
-        
+        input_img = imread(os.path.join(self.input_path, input_file))   # shape [H, W, channels]
+        output_img = None
+        if self.load_output:
+            output_img = imread(os.path.join(self.output_path, output_file)) # shape [H, W]
+
         freq_MHz = self.freqs_MHz[int(f)-1]
         x_min, x_max, y_min, y_max, W, H = building_details.iloc[0].astype(int).to_list()
         
@@ -290,11 +300,12 @@ class PathlossDataset(Dataset):
         if self.load_output:
             if not output_file or not os.path.exists(os.path.join(self.output_path, output_file)):
                 raise ValueError(f"output_path must be a valid existing path during training. Instead got {output_file!r}")
-            output_img = imread(os.path.join(self.output_path, output_file)) # shape [H, W]
             output_tensor = torch.from_numpy(output_img.astype(np.float32))
             if self.training:
                 output_tensor = self.normalizer.normalize_output(output_tensor)
 
+        if self.training:
+            input_tensor, output_tensor = self.rotate_and_crop(input_tensor, output_tensor) 
         padded_input, padded_output, mask = self.pad(
             input_tensor=input_tensor,
             output_tensor=output_tensor,
