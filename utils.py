@@ -1,4 +1,5 @@
 import os
+import re
 import time
 import torch
 import numpy as np
@@ -96,18 +97,18 @@ def matrix_to_image(*matrices, titles=None, save_path=None):
     plt.tight_layout()
     plt.savefig(save_path)
     plt.close()
+    print(f"Saved image at {save_path}")
     return diffs
 
 def load_model(weights_path=None, device=None):    
     model = UNetModel()
     if not os.path.isfile(weights_path):
-        weights_path = os.path.join(BASE_DIR, "models/", weights_path)
-        if not os.path.isfile(weights_path):
-            raise ValueError(f"Model weights_path {weights_path} doesn't exist.")
-        model.load_state_dict(torch.load(weights_path))
+        raise ValueError(f"Model weights_path {weights_path} doesn't exist.")
+    
+    model.load_state_dict(torch.load(weights_path))
     if device:
         model = model.to(device)
-        
+    print(f"Loaded model params from '{weights_path}' and moved to device '{device}")
     return model
 
 
@@ -173,4 +174,11 @@ def split_data_task3(files_list, val_freqs, val_antennas, split_save_path=None):
                       "val_freqs": val_freqs,
                       "val_antennas": val_antennas}, fp)
     return train, val
+
+def fname_to_ids(fnames):
+    if not isinstance(fnames):
+        fnames = [fnames]
+    ids = [list(map(int, re.findall(r"\d+", fname.split(".")[0]))) for fname in fnames]
+    if len(fnames) == 1:
+        return ids[0]
 
