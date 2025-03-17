@@ -1,0 +1,103 @@
+import os
+import torch
+import numpy as np
+from skimage.io import imread
+import matplotlib.pyplot as plt
+import torchvision.transforms.functional as TF
+from torchvision.transforms.functional import InterpolationMode
+
+
+class GeometricTransform:
+    def __init__(self, rotate_range=None, flip=False):
+        self.rotate_range = rotate_range
+        self.flip = flip
+
+    def rotate_db_image(self, db_t, angle, mask_t):
+        lin = 10.0 ** (db_t / 10.0)
+        lin_rot = TF.rotate(lin, angle, interpolation=InterpolationMode.BILINEAR, expand=True)
+        out = torch.zeros_like(lin_rot)
+        nz = lin_rot > 0
+        out[nz] = 10.0 * torch.log10(lin_rot[nz])
+        return out * mask_t
+
+    def rotate_linear(self, x_t, angle, mask_t):
+        x_rot = TF.rotate(x_t, angle, interpolation=InterpolationMode.BILINEAR, expand=True)
+        return x_rot * mask_t
+
+    def rotate_mask(self, m_t, angle):
+        return TF.rotate(m_t, angle, interpolation=InterpolationMode.NEAREST, expand=True)
+
+    def __call__(self, inp_np, out_np, mask_np):
+        # Each of these is [C, H, W], so we convert them to tensors directly.
+        trans_t = torch.from_numpy(inp_np[0]).unsqueeze(0).float()  # shape [1,H,W]
+        refl_t  = torch.from_numpy(inp_np[1]).unsqueeze(0).float()  # shape [1,H,W]
+        dist_t  = torch.from_numpy(inp_np[2]).unsqueeze(0).float()  # shape [1,H,W]
+
+        out_t   = torch.from_numpy(out_np).unsqueeze(0).float()  # shape [1,H,W], a single dB channel
+        mask_t  = torch.from_numpy(mask_np).unsqueeze(0).float() # shape [1,H,W], same size as out_t
+
+        if self.rotate_range:
+            angle = np.random.uniform(*self.rotate_range)
+            mask_t  = self.rotate_mask(mask_t, angle)
+            trans_t = self.rotate_db_image(trans_t, angle, mask_t)
+            refl_t  = self.rotate_db_image(refl_t,  angle, mask_t)
+            dist_t  = self.rotate_linear(dist_t,    angle, mask_t)
+            out_t   = self.rotate_db_image(out_t,   angle, mask_t)
+
+        if self.flip:
+            operator = np.random.choice([TF.hflip, TF.vflip])
+            trans_t = operator(trans_t)
+            refl_t  = operator(refl_t)
+            dist_t  = operator(dist_t)
+            out_t   = operator(out_t)
+            mask_t  = operator(mask_t)
+
+        inp_t = torch.cat([trans_t, refl_t, dist_t], dim=0)
+        out_t, mask_t = out_t.squeeze(0), mask_t.squeeze(0)
+        return inp_t, out_t, mask_t
+
+
+
+if __name__ == "__main__":
+    inpath = "/Users/xoren/icassp2025/data/Inputs/Task_2_ICASSP/"
+    outpath = "/Users/xoren/icassp2025/data/Outputs/Task_2_ICASSP/"
+
+    def show(in0, out0, mask0, nin, nout, nmask):
+        fig, axes = plt.subplots(nrows=2, ncols=5)#, figsize=(15, 15))
+
+        axes[0,0].imshow(in0[0], cmap="coolwarm")
+        axes[0,1].imshow(in0[1], cmap="coolwarm")
+        axes[0,2].imshow(in0[2], cmap="coolwarm")
+        axes[0,3].imshow(out0, cmap="coolwarm")
+        axes[0,4].imshow(mask0, cmap="coolwarm")
+
+        axes[1,0].imshow(nin[0], cmap="coolwarm")
+        axes[1,1].imshow(nin[1], cmap="coolwarm")
+        axes[1,2].imshow(nin[2], cmap="coolwarm")
+        axes[1,3].imshow(nout, cmap="coolwarm")
+        axes[1,4].imshow(nmask, cmap="coolwarm")
+
+        plt.tight_layout()
+        plt.show()
+
+    def readf(ids=None, fname=None):
+        if ids is None and fname is None:
+            raise ValueError("aa")
+        fname = fname # f"B{b}_Ant{ant}_f{f}_S{sp}.png"
+        ins = imread(os.path.join(inpath, fname))
+        outs = imread(os.path.join(outpath, fname))
+        return ins, outs
+
+    in0, out0 = readf(fname="B1_Ant1_f1_S0.png")
+    in1, out1 = readf(fname="B1_Ant1_f1_S33.png")
+
+    trans = GeometricTransform(
+        rotate_range=(15, 15),
+        flip=True,
+    )
+
+    in0 = in0.transpose(2,0,1)
+    mask_np = np.ones(out0.shape)
+    nin, nout, nmask = trans(in0, out0, mask_np)
+
+    show(in0, out0, mask_np, nin, nout, nmask)

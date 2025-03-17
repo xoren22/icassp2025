@@ -104,8 +104,5 @@ def main():
         save_dir=MODEL_SAVE_PATH,
     )
    
-    logger.close()
-
-
 if __name__ == "__main__":
     main()

@@ -175,10 +175,11 @@ def split_data_task3(files_list, val_freqs, val_antennas, split_save_path=None):
                       "val_antennas": val_antennas}, fp)
     return train, val
 
-def fname_to_ids(fnames):
+def fname_to_ids(fnames, list):
     if not isinstance(fnames):
         fnames = [fnames]
     ids = [list(map(int, re.findall(r"\d+", fname.split(".")[0]))) for fname in fnames]
     if len(fnames) == 1:
         return ids[0]
+    return ids
 
