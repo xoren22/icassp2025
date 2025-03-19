@@ -59,6 +59,7 @@ def main():
                         file_list.append((b, ant, f, sp))
 
     logger = TrainingLogger()
+    print(f"\nLogging results at {logger.log_dir}\n\n")
 
     split_save_path=os.path.join(logger.log_dir, "train_val_split.pkl")
     train_files, val_files = split_data_task2(file_list, val_freqs=3, split_save_path=split_save_path)
@@ -84,8 +85,8 @@ def main():
         load_output=True, training=False
     )
     
-    train_loader = DataLoader(train_dataset, batch_size=args.batch_size, shuffle=True, num_workers=4)
     val_loader = DataLoader(val_dataset, batch_size=args.batch_size, shuffle=False, num_workers=4)
+    train_loader = DataLoader(train_dataset, batch_size=args.batch_size, shuffle=True, num_workers=4)
     
     model = UNetModel().to(device)
     

@@ -11,3 +11,4 @@ inference_outputs/
 
 # files
 tmp.py
+*.ipynb

@@ -7,7 +7,6 @@ import pickle as pkl
 import matplotlib.pyplot as plt
 from contextlib import contextmanager
 
-from config import BASE_DIR
 from model import UNetModel
 
 
@@ -144,19 +143,18 @@ def split_data_task1(files_list, val_ratio=0.25, split_save_path=None, seed=None
 
 
 def split_data_task2(files_list, val_freqs, split_save_path=None):
+    train_files, val_files = split_data_task1(files_list)
     val_freqs = val_freqs if isinstance(val_freqs, list) else [val_freqs]
+    val_files = [f for f in val_files if f[2] in val_freqs]
 
-    train, val = [], []
-    for f in files_list:
-        if f[2] in val_freqs:
-            val.append(f)
-        else:
-            train.append(f)
     if split_save_path:
         with open(split_save_path, "wb") as fp:
-            pkl.dump({"train_files": train, "val_files": val,
-                      "val_freqs": val_freqs}, fp)
-    return train, val
+            pkl.dump({
+                "train_files": train_files, 
+                "val_files": val_files,
+                "val_freqs": val_freqs}, fp
+            )
+    return train_files, val_files
 
 def split_data_task3(files_list, val_freqs, val_antennas, split_save_path=None):
     val_freqs = val_freqs if isinstance(val_freqs, list) else [val_freqs]

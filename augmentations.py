@@ -55,6 +55,55 @@ class GeometricTransform:
         inp_t = torch.cat([trans_t, refl_t, dist_t], dim=0)
         out_t, mask_t = out_t.squeeze(0), mask_t.squeeze(0)
         return inp_t, out_t, mask_t
+    
+
+import random
+import torch
+import torchvision.transforms.functional as TF
+from torchvision.transforms.functional import InterpolationMode
+
+class ResizeAug:
+    def __init__(self, scale_range=(0.5, 1.5)):
+        self.scale_range = scale_range
+
+    def __call__(self, inp_np, out_np, mask_np):
+        # inp_np: [3, H, W] -> channels 0 & 1 are dB, channel 2 is distance (linear)
+        # out_np: [1, H, W] -> dB
+        # mask_np: [1, H, W] -> discrete
+        trans = torch.from_numpy(inp_np[0]).unsqueeze(0).float()   # dB
+        refl  = torch.from_numpy(inp_np[1]).unsqueeze(0).float()   # dB
+        dist  = torch.from_numpy(inp_np[2]).unsqueeze(0).float()   # linear
+        out_t = torch.from_numpy(out_np[0]).unsqueeze(0).float()   # dB
+        mask  = torch.from_numpy(mask_np[0]).unsqueeze(0).float()  # discrete
+
+        # Pick random scale factor, compute new size
+        factor = random.uniform(*self.scale_range)
+        H, W = trans.shape[-2], trans.shape[-1]
+        new_size = (int(H * factor), int(W * factor))
+
+        # Helper to “do it right” for dB channels
+        def resize_db(db_t):
+            lin = 10**(db_t / 10.0)
+            lin_rs = TF.resize(lin, new_size, InterpolationMode.BILINEAR)
+            out = torch.zeros_like(lin_rs)
+            nz = lin_rs > 0
+            out[nz] = 10.0 * torch.log10(lin_rs[nz])
+            return out
+
+        # Resize mask with nearest
+        mask = TF.resize(mask, new_size, InterpolationMode.NEAREST)
+
+        # Resize channels
+        trans = resize_db(trans) * mask
+        refl  = resize_db(refl)  * mask
+        dist  = TF.resize(dist, new_size, InterpolationMode.BILINEAR) * mask
+        out_t = resize_db(out_t) * mask
+
+        # Reassemble input => [3, newH, newW]
+        inp_t = torch.cat([trans, refl, dist], dim=0)
+        # out_t => [1, newH, newW], mask => [1, newH, newW]
+        return inp_t, out_t, mask
+
 
 
 

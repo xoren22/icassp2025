@@ -4,7 +4,8 @@ import numpy as np
 import pandas as pd
 from numba import njit
 from skimage.io import imread
-from skimage.transform import rotate
+import torch.nn.functional as F
+from skimage.transform import resize
 from torch.utils.data import Dataset
 
 from config import OUTPUT_SCALER
@@ -40,7 +41,7 @@ class PathlossNormalizer:
         normalized[2] = np.log10(1 + normalized[2])
         normalized[3] = normalized[3] / self.min_antenna_gain
         normalized[4] = np.log10(normalized[4]) - 1.9  # "magic shift"
-        normalized[5] = self.normalize_output(normalized[5])
+        normalized[5] = normalized[5] / 100.0 # this feature mask has values < 300
 
         return normalized
     
@@ -141,6 +142,44 @@ def calculate_transmittance_loss(transmittance_matrix, x_ant, y_ant,
 calculate_transmittance_loss(np.array([[1]]), 0, 0)
 
 
+def calculate_fspl(
+    W,
+    H,
+    x_ant,
+    y_ant,
+    antenna_gain,           # shape=(360,) antenna gain in dBi [0..359]
+    freq_MHz,               # frequency in MHz
+    grid_unit_meters=0.25,  # cell size in meters
+    min_distance_m=0.125,     # clamp distance below this
+):
+    """
+    Example free-space pathloss calculation with distance clamping.
+    """
+    y_idx, x_idx = np.indices((H, W))
+
+    dx = x_idx - x_ant
+    dy = y_idx - y_ant
+
+    dist_m = np.sqrt(dx**2 + dy**2) * grid_unit_meters
+    dist_clamped = np.maximum(dist_m, min_distance_m)
+
+    fspl_db = 20.0 * np.log10(dist_clamped) + 20.0 * np.log10(freq_MHz) - 27.55
+
+    pathloss_db = fspl_db - antenna_gain
+    return pathloss_db
+
+
+def calculate_antenna_gain(radiation_pattern, W, H, azimuth, x_ant, y_ant):
+    x_grid = np.repeat(np.linspace(0, W-1, W), H, axis=0).reshape(W, H).T
+    y_grid = np.repeat(np.linspace(0, H-1, H), W, axis=0).reshape(H, W)
+    
+    angles = -(180/np.pi) * np.arctan2((y_ant - y_grid), (x_ant - x_grid)) + 180 + azimuth
+    angles = np.where(angles > 359, angles - 360, angles).astype(int)
+    antenna_gain = radiation_pattern[angles]
+    return antenna_gain
+
+
+
 class PathlossDataset(Dataset):
     """
     Pads input/output to 640 x 640 and returns a mask indicating the valid region.
@@ -178,33 +217,6 @@ class PathlossDataset(Dataset):
 
     def __len__(self):
         return len(self.file_list)
-
-    def calculate_fspl(
-        self,
-        W,
-        H,
-        x_ant,
-        y_ant,
-        antenna_gain,           # shape=(360,) antenna gain in dBi [0..359]
-        freq_MHz,               # frequency in MHz
-        grid_unit_meters=0.25,  # cell size in meters
-        min_distance_m=0.125,     # clamp distance below this
-    ):
-        """
-        Example free-space pathloss calculation with distance clamping.
-        """
-        y_idx, x_idx = np.indices((H, W))
-
-        dx = x_idx - x_ant
-        dy = y_idx - y_ant
-
-        dist_m = np.sqrt(dx**2 + dy**2) * grid_unit_meters
-        dist_clamped = np.maximum(dist_m, min_distance_m)
-
-        fspl_db = 20.0 * np.log10(dist_clamped) + 20.0 * np.log10(freq_MHz) - 27.55
-
-        pathloss_db = fspl_db - antenna_gain
-        return pathloss_db
     
     def pad(self, input_tensor, output_tensor):
         n_input_channels, H, W = input_tensor.size()
@@ -224,16 +236,6 @@ class PathlossDataset(Dataset):
 
         return padded_input, padded_output, mask
     
-    def calculate_antenna_gain(self, radiation_pattern, W, H, azimuth, x_ant, y_ant):
-        x_grid = np.repeat(np.linspace(0, W-1, W), H, axis=0).reshape(W, H).T
-        y_grid = np.repeat(np.linspace(0, H-1, H), W, axis=0).reshape(H, W)
-        
-        angles = -(180/np.pi) * np.arctan2((y_ant - y_grid), (x_ant - x_grid)) + 180 + azimuth
-        angles = np.where(angles > 359, angles - 360, angles).astype(int)
-        antenna_gain = radiation_pattern[angles]
-        return antenna_gain
-    
-
     def rotate_and_crop(self, input_img, output_img):
         k = np.random.randint(0, 3)  # 0 -> 0°, 1 -> 90°, 2 -> 180°, 3 -> 270°
         output_rot = torch.rot90(output_img, k)
@@ -272,13 +274,43 @@ class PathlossDataset(Dataset):
         y_ant = sampling_positions["X"].loc[int(sp)]
         azimuth = sampling_positions['Azimuth'].iloc[int(sp)]
 
-        antenna_gain = self.calculate_antenna_gain(radiation_pattern, W, H, azimuth, x_ant, y_ant)
+        orig_max_dim = max(W, H)
+
+
+        if orig_max_dim < self.target_size:
+            scale = self.target_size / float(orig_max_dim)
+            new_W = int(round(W * scale))
+            new_H = int(round(H * scale))
+
+            # Scale the input_img from [H, W, C] to [new_H, new_W, C]
+            input_img = resize(
+                input_img,
+                (new_H, new_W, input_img.shape[-1]),
+                preserve_range=True,  # keep original intensities
+                anti_aliasing=True
+            ).astype(input_img.dtype)
+
+            # Scale the output image if loaded
+            if self.load_output:
+                output_img = resize(
+                    output_img,
+                    (new_H, new_W),
+                    preserve_range=True,
+                    anti_aliasing=True
+                ).astype(output_img.dtype)
+
+            # Update building dimensions and antenna coords
+            W, H = new_W, new_H
+            x_ant *= scale
+            y_ant *= scale
+
+        antenna_gain = calculate_antenna_gain(radiation_pattern, W, H, azimuth, x_ant, y_ant)
 
         reflectance = input_img[:, :, 0].astype(np.float32)
         transmittance = input_img[:, :, 1].astype(np.float32)
         distance = input_img[:, :, 2].astype(np.float32)
 
-        free_space_pathloss = self.calculate_fspl(
+        free_space_pathloss = calculate_fspl(
             W, H, x_ant, y_ant, antenna_gain, freq_MHz
         )
 
@@ -286,7 +318,7 @@ class PathlossDataset(Dataset):
         fs_plus_transmittance_loss = free_space_pathloss + transmittance_loss
 
         # Build input tensor: [6, H, W]
-        input_tensor = np.zeros((6, H, W), dtype=np.float32)
+        input_tensor = np.zeros((7, H, W), dtype=np.float32)
         input_tensor[0] = reflectance  # reflectance
         input_tensor[1] =  transmittance # transmittance
         input_tensor[2] = distance # distance
@@ -310,6 +342,8 @@ class PathlossDataset(Dataset):
             input_tensor=input_tensor,
             output_tensor=output_tensor,
         )
+
+        padded_input[6] = mask
 
         return padded_input, padded_output, mask
 
