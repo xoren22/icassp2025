@@ -15,7 +15,7 @@ def main():
     parser = argparse.ArgumentParser(description='Train and evaluate pathloss prediction model')
 
     parser.add_argument('--gpu', type=int, default=None, help='GPU ID to use (default: auto-select)')
-    parser.add_argument('--batch_size', type=int, default=8, help='Batch size for training')
+    parser.add_argument('--batch_size', type=int, default=32, help='Batch size for training')
     parser.add_argument('--epochs', type=int, default=200, help='Number of epochs to train')
     parser.add_argument('--lr', type=float, default=3e-4, help='Learning rate')
     parser.add_argument('--data_dir', type=str, default='data', help='Data directory')
@@ -27,7 +27,7 @@ def main():
     if args.gpu is not None:
         device = torch.device(f"cuda:{args.gpu}" if torch.cuda.is_available() else "cpu")
     else:
-        device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+        device = torch.device("cuda:1" if torch.cuda.is_available() else "cpu")
     
     print(f"Using device: {device}")
     
@@ -90,8 +90,8 @@ def main():
     
     model = UNetModel().to(device)
     
-    optimizer = optim.Adam(model.parameters(), lr=args.lr)    
-    scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=50, verbose=True)
+    optimizer = optim.Adam(model.parameters(), lr=args.lr, weight_decay=1e-5)    
+    scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=500, verbose=True)
     
     train_model(
         model=model, 

@@ -4,9 +4,8 @@ import numpy as np
 import pandas as pd
 from numba import njit
 from skimage.io import imread
-import torch.nn.functional as F
-from skimage.transform import resize
 from torch.utils.data import Dataset
+import torchvision.transforms.functional as TF
 
 from config import OUTPUT_SCALER
 from utils import matrix_to_image, measure_time
@@ -199,6 +198,7 @@ class PathlossDataset(Dataset):
             training: If True, we normalize outputs to [-1,1]
         """
 
+        self.training = training
         self.file_list = file_list
         self.input_path = input_path
         self.load_output = load_output
@@ -206,7 +206,6 @@ class PathlossDataset(Dataset):
         self.positions_path = positions_path
         self.buildings_path = buildings_path
         self.radiation_path = radiation_path
-        self.training = training
         self.normalizer = PathlossNormalizer()
         
         # Frequencies
@@ -242,6 +241,16 @@ class PathlossDataset(Dataset):
         input_rot = torch.rot90(input_img, k, [1, 2])
         return input_rot, output_rot
     
+    def resize(self, img, H, W, in_db=True):
+        img = 10.0 ** (img / 10.0) if in_db else img
+
+        img = img.unsqueeze(0)
+        img = TF.resize(img, [H, W], interpolation=TF.InterpolationMode.BILINEAR)
+        img = img.squeeze(0)
+        
+        img = 10.0 * torch.log10(img) if in_db else img
+        return img
+    
     def __getitem__(self, idx):
         b, ant, f, sp = self.file_list[idx]
         
@@ -265,7 +274,14 @@ class PathlossDataset(Dataset):
         input_img = imread(os.path.join(self.input_path, input_file))   # shape [H, W, channels]
         output_img = None
         if self.load_output:
-            output_img = imread(os.path.join(self.output_path, output_file)) # shape [H, W]
+            output_path = os.path.join(self.output_path, output_file)
+            if not output_file or not os.path.exists(output_path):
+                raise ValueError(f"output_path must be a valid existing path during training. Instead got {output_file!r}")
+            output_img = imread(output_path)
+            output_tensor = torch.from_numpy(output_img.astype(np.float32))
+            if self.training:
+                output_tensor = self.normalizer.normalize_output(output_tensor)
+
 
         freq_MHz = self.freqs_MHz[int(f)-1]
         x_min, x_max, y_min, y_max, W, H = building_details.iloc[0].astype(int).to_list()
@@ -274,47 +290,33 @@ class PathlossDataset(Dataset):
         y_ant = sampling_positions["X"].loc[int(sp)]
         azimuth = sampling_positions['Azimuth'].iloc[int(sp)]
 
+        reflectance = torch.from_numpy(input_img[:, :, 0]).to(torch.float32)
+        transmittance = torch.from_numpy(input_img[:, :, 1]).to(torch.float32)
+        distance = torch.from_numpy(input_img[:, :, 2]).to(torch.float32)
+
         orig_max_dim = max(W, H)
-
-
         if orig_max_dim < self.target_size:
             scale = self.target_size / float(orig_max_dim)
             new_W = int(round(W * scale))
             new_H = int(round(H * scale))
 
-            # Scale the input_img from [H, W, C] to [new_H, new_W, C]
-            input_img = resize(
-                input_img,
-                (new_H, new_W, input_img.shape[-1]),
-                preserve_range=True,  # keep original intensities
-                anti_aliasing=True
-            ).astype(input_img.dtype)
+            reflectance = self.resize(reflectance, new_H, new_W)
+            transmittance = self.resize(transmittance, new_H, new_W)
+            distance = self.resize(distance, new_H, new_W, in_db=False)
 
-            # Scale the output image if loaded
             if self.load_output:
-                output_img = resize(
-                    output_img,
-                    (new_H, new_W),
-                    preserve_range=True,
-                    anti_aliasing=True
-                ).astype(output_img.dtype)
+                output_tensor = self.resize(output_tensor, new_H, new_W)
 
-            # Update building dimensions and antenna coords
             W, H = new_W, new_H
             x_ant *= scale
             y_ant *= scale
 
         antenna_gain = calculate_antenna_gain(radiation_pattern, W, H, azimuth, x_ant, y_ant)
-
-        reflectance = input_img[:, :, 0].astype(np.float32)
-        transmittance = input_img[:, :, 1].astype(np.float32)
-        distance = input_img[:, :, 2].astype(np.float32)
-
         free_space_pathloss = calculate_fspl(
             W, H, x_ant, y_ant, antenna_gain, freq_MHz
         )
 
-        transmittance_loss = calculate_transmittance_loss(transmittance, x_ant, y_ant)
+        transmittance_loss = calculate_transmittance_loss(transmittance.numpy(), x_ant, y_ant)
         fs_plus_transmittance_loss = free_space_pathloss + transmittance_loss
 
         # Build input tensor: [6, H, W]
@@ -328,13 +330,6 @@ class PathlossDataset(Dataset):
 
         input_tensor = torch.from_numpy(input_tensor)
         input_tensor = self.normalizer.normalize_input(input_tensor)
-
-        if self.load_output:
-            if not output_file or not os.path.exists(os.path.join(self.output_path, output_file)):
-                raise ValueError(f"output_path must be a valid existing path during training. Instead got {output_file!r}")
-            output_tensor = torch.from_numpy(output_img.astype(np.float32))
-            if self.training:
-                output_tensor = self.normalizer.normalize_output(output_tensor)
 
         if self.training:
             input_tensor, output_tensor = self.rotate_and_crop(input_tensor, output_tensor) 
