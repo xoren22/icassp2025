@@ -146,6 +146,7 @@ def split_data_task2(files_list, val_freqs, split_save_path=None):
     train_files, val_files = split_data_task1(files_list)
     val_freqs = val_freqs if isinstance(val_freqs, list) else [val_freqs]
     val_files = [f for f in val_files if f[2] in val_freqs]
+    train_files = [f for f in train_files if f[2] not in val_freqs]
 
     if split_save_path:
         with open(split_save_path, "wb") as fp:
@@ -155,6 +156,7 @@ def split_data_task2(files_list, val_freqs, split_save_path=None):
                 "val_freqs": val_freqs}, fp
             )
     return train_files, val_files
+
 
 def split_data_task3(files_list, val_freqs, val_antennas, split_save_path=None):
     val_freqs = val_freqs if isinstance(val_freqs, list) else [val_freqs]
@@ -172,6 +174,7 @@ def split_data_task3(files_list, val_freqs, val_antennas, split_save_path=None):
                       "val_freqs": val_freqs,
                       "val_antennas": val_antennas}, fp)
     return train, val
+
 
 def fname_to_ids(fnames, list):
     if not isinstance(fnames):
