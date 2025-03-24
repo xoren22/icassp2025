@@ -184,3 +184,9 @@ def fname_to_ids(fnames, list):
         return ids[0]
     return ids
 
+def check_tensor_device(tensor, name, expected_device='cpu'):
+    if tensor.device.type != expected_device:
+        print(f"WARNING: {name} is on {tensor.device} but should be on {expected_device}")
+        return False
+    return True
+

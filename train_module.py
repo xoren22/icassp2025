@@ -2,7 +2,6 @@ import os
 import gc
 import torch
 from tqdm import tqdm
-from torchvision.utils import make_grid
 from torch.amp import autocast, GradScaler
 
 from loss import rmse, se, create_sip2net_loss
@@ -96,8 +95,9 @@ def train_model(model, train_loader, val_loader, optimizer, scheduler, num_epoch
 
             logger.log_batch_loss(batch_se.item(), mask_sum.item())
 
-            del inputs, targets, masks, preds
+            del inputs, targets, masks, preds, batch_se, batch_mse, loss, mask_sum
             torch.cuda.empty_cache()
+
 
         val_loss = evaluate_model(model, val_loader, logger=logger, device=device, use_sip2net=use_sip2net)
         print(f"Validation RMSE: {val_loss}")

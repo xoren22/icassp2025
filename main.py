@@ -14,7 +14,7 @@ from data_module import PathlossDataset
 def main():
     parser = argparse.ArgumentParser(description='Train and evaluate pathloss prediction model')
 
-    parser.add_argument('--num_workers', type=int, default=1, help='number of workers')
+    parser.add_argument('--num_workers', type=int, default=4, help='number of workers')
     
     parser.add_argument('--gpu', type=int, default=None, help='GPU ID to use (default: auto-select)')
     parser.add_argument('--batch_size', type=int, default=8, help='Batch size for training')
@@ -29,7 +29,7 @@ def main():
     if args.gpu is not None:
         device = torch.device(f"cuda:{args.gpu}" if torch.cuda.is_available() else "cpu")
     else:
-        device = torch.device("cuda:1" if torch.cuda.is_available() else "cpu")
+        device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
     
     print(f"Using device: {device}")
     
@@ -64,7 +64,7 @@ def main():
     print(f"\nLogging results at {logger.log_dir}\n\n")
 
     split_save_path=os.path.join(logger.log_dir, "train_val_split.pkl")
-    train_files, val_files = split_data_task2(file_list, val_freqs=3, split_save_path=split_save_path)
+    train_files, val_files = split_data_task2(file_list, val_freqs=2, split_save_path=split_save_path)
     print(f"Train: {len(train_files)}, Validation: {len(val_files)}")
     
     train_dataset = PathlossDataset(
