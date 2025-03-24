@@ -14,6 +14,8 @@ from data_module import PathlossDataset
 def main():
     parser = argparse.ArgumentParser(description='Train and evaluate pathloss prediction model')
 
+    parser.add_argument('--num_workers', type=int, default=1, help='number of workers')
+    
     parser.add_argument('--gpu', type=int, default=None, help='GPU ID to use (default: auto-select)')
     parser.add_argument('--batch_size', type=int, default=8, help='Batch size for training')
     parser.add_argument('--epochs', type=int, default=200, help='Number of epochs to train')
@@ -85,8 +87,8 @@ def main():
         load_output=True, training=False
     )
     
-    val_loader = DataLoader(val_dataset, batch_size=args.batch_size, shuffle=False, num_workers=4)
-    train_loader = DataLoader(train_dataset, batch_size=args.batch_size, shuffle=True, num_workers=4)
+    val_loader = DataLoader(val_dataset, batch_size=args.batch_size, shuffle=False, num_workers=args.num_workers)
+    train_loader = DataLoader(train_dataset, batch_size=args.batch_size, shuffle=True, num_workers=args.num_workers)
     
     model = UNetModel().to(device)
     
