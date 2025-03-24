@@ -1,10 +1,114 @@
 import os
 import torch
+import random
 import numpy as np
 from skimage.io import imread
 import matplotlib.pyplot as plt
 import torchvision.transforms.functional as TF
 from torchvision.transforms.functional import InterpolationMode
+
+
+def resize_nearest(img, new_size):
+    """
+    Resize image using nearest neighbor interpolation with PyTorch.
+    
+    Args:
+        img: numpy.ndarray input image
+        new_size: tuple (height, width) for the output size
+        
+    Returns:
+        numpy.ndarray resized image
+    """
+    # Convert numpy array to torch tensor
+    img_tensor = torch.from_numpy(img).float()
+    
+    # Add batch and channel dimensions if needed
+    if len(img_tensor.shape) == 2:
+        img_tensor = img_tensor.unsqueeze(0).unsqueeze(0)  # Add batch and channel dimensions
+    elif len(img_tensor.shape) == 3:
+        img_tensor = img_tensor.unsqueeze(0)  # Add batch dimension
+    
+    # Resize with PyTorch
+    img_rs = TF.resize(img_tensor, new_size, interpolation=InterpolationMode.NEAREST_EXACT)
+    
+    # Remove batch dimension
+    img_rs = img_rs.squeeze(0)
+    
+    # Convert back to numpy array with original dtype
+    return img_rs.cpu().numpy().astype(img.dtype)
+
+
+def resize_linear(img, new_size):
+    """
+    Resize image using bilinear interpolation with PyTorch.
+    
+    Args:
+        img: numpy.ndarray input image
+        new_size: tuple (height, width) for the output size
+        
+    Returns:
+        numpy.ndarray resized image
+    """
+    # Convert numpy array to torch tensor
+    img_tensor = torch.from_numpy(img).float()
+    
+    # Add batch and channel dimensions if needed
+    if len(img_tensor.shape) == 2:
+        img_tensor = img_tensor.unsqueeze(0).unsqueeze(0)  # Add batch and channel dimensions
+    elif len(img_tensor.shape) == 3:
+        img_tensor = img_tensor.unsqueeze(0)  # Add batch dimension
+    
+    # Resize with PyTorch
+    img_rs = TF.resize(img_tensor, new_size, interpolation=InterpolationMode.BILINEAR)
+    
+    # Remove batch dimension
+    img_rs = img_rs.squeeze(0)
+    
+    # Convert back to numpy array with original dtype
+    return img_rs.cpu().numpy().astype(img.dtype)
+
+
+def resize_db(img, new_size):
+    """
+    Resize image in decibel scale with bilinear interpolation using PyTorch.
+    
+    Args:
+        img: numpy.ndarray input image in dB scale
+        new_size: tuple (height, width) for the output size
+        
+    Returns:
+        numpy.ndarray resized image in dB scale
+    """
+    # Convert from dB to linear scale
+    lin_energy = 10**(img / 10.0)
+    
+    # Convert numpy array to torch tensor
+    lin_tensor = torch.from_numpy(lin_energy).float()
+    
+    # Add batch and channel dimensions if needed
+    if len(lin_tensor.shape) == 2:
+        lin_tensor = lin_tensor.unsqueeze(0).unsqueeze(0)  # Add batch and channel dimensions
+    elif len(lin_tensor.shape) == 3:
+        lin_tensor = lin_tensor.unsqueeze(0)  # Add batch dimension
+    
+    # Resize with PyTorch
+    lin_rs = TF.resize(lin_tensor, new_size, interpolation=InterpolationMode.BILINEAR)
+    
+    # Remove batch dimension
+    lin_rs = lin_rs.squeeze(0)
+    
+    # Convert back to numpy array
+    lin_rs_np = lin_rs.cpu().numpy()
+    
+    # Convert back to dB scale, handling zeros
+    img_rs = np.zeros_like(lin_rs_np)
+    valid_mask = lin_rs_np > 0
+    img_rs[valid_mask] = 10.0 * np.log10(lin_rs_np[valid_mask])
+    
+    return img_rs.astype(img.dtype)
+
+    
+
 
 
 class GeometricTransform:
@@ -56,11 +160,6 @@ class GeometricTransform:
         out_t, mask_t = out_t.squeeze(0), mask_t.squeeze(0)
         return inp_t, out_t, mask_t
     
-
-import random
-import torch
-import torchvision.transforms.functional as TF
-from torchvision.transforms.functional import InterpolationMode
 
 class ResizeAug:
     def __init__(self, scale_range=(0.5, 1.5)):

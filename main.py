@@ -85,8 +85,8 @@ def main():
         load_output=True, training=False
     )
     
-    val_loader = DataLoader(val_dataset, batch_size=args.batch_size, shuffle=False, num_workers=4)
-    train_loader = DataLoader(train_dataset, batch_size=args.batch_size, shuffle=True, num_workers=4)
+    val_loader = DataLoader(val_dataset, batch_size=args.batch_size, shuffle=False, num_workers=1)
+    train_loader = DataLoader(train_dataset, batch_size=args.batch_size, shuffle=True, num_workers=1)
     
     model = UNetModel().to(device)
     
@@ -103,7 +103,8 @@ def main():
         logger=logger, 
         device=device, 
         save_dir=MODEL_SAVE_PATH,
+        use_sip2net=True,
     )
-   
+
 if __name__ == "__main__":
     main()

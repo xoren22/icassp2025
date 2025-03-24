@@ -2,8 +2,6 @@ import torch
 import torch.nn as nn
 import segmentation_models_pytorch as smp
 
-from config import OUTPUT_SCALER
-
 
 class ASPPModule(nn.Module):
     def __init__(self, in_channels, out_channels):
@@ -55,19 +53,19 @@ class ASPPModule(nn.Module):
 
 
 class UNetModel(nn.Module):
-    def __init__(self, n_channels=7, output_scale=OUTPUT_SCALER):
+    def __init__(self, n_channels=7):
         super(UNetModel, self).__init__()
-
-        self.output_scale = output_scale
+        
         self.unet = smp.Unet(
-            encoder_name="resnet18",
+            encoder_name="resnet34",  # Changed from resnet18 to resnet34
             encoder_weights="imagenet",
             in_channels=n_channels,
             classes=1,
-            activation=None  # We'll produce raw logits
+            activation=None
         )
         
-        # Add ASPP at bottleneck (resnet18 bottleneck has 512 channels)
+        # ResNet34 bottleneck still has 512 channels like ResNet18,
+        # but the network is deeper with more layers
         self.aspp = ASPPModule(in_channels=512, out_channels=512)
 
         with torch.no_grad():
@@ -92,21 +90,11 @@ class UNetModel(nn.Module):
 
             self.unet.encoder.conv1 = new_conv
 
-    def _rescale_outputs(self, output):
-        return (1 + output / 2) * self.output_scale
-
     def forward(self, x):
-        # Get encoder features
         features = self.unet.encoder(x)
-        
-        # Apply ASPP to bottleneck
         features[-1] = self.aspp(features[-1])
-        
-        # Continue with regular UNet forward pass
         decoder_output = self.unet.decoder(*features)
         logits = self.unet.segmentation_head(decoder_output)
         
         output = logits.squeeze(1)
-        if not self.training:
-            output = self._rescale_outputs(output)
         return output

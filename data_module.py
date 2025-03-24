@@ -2,38 +2,39 @@ import os
 import torch
 import numpy as np
 import pandas as pd
-from numba import njit
+from typing import Tuple
 from skimage.io import imread
+from dataclasses import dataclass
 from torch.utils.data import Dataset
-import torchvision.transforms.functional as TF
 
-from config import OUTPUT_SCALER
-from utils import matrix_to_image, measure_time
+from featurizer import *
+from augmentations import resize_db, resize_nearest, resize_linear
+
+
+@dataclass
+class RadarSample:
+    H: int
+    W: int
+    x_ant: float
+    y_ant: float
+    azimuth: float
+    freq_MHz: float
+    input_img: np.ndarray  
+    output_img: np.ndarray
+    radiation_pattern: np.array
 
 
 class PathlossNormalizer:
     def __init__(
             self,
             min_antenna_gain=-55.0,
-            pathloss_scaler=OUTPUT_SCALER,
         ):
         # ImageNet stats for the first three channels
         self.mean = [0.485, 0.456, 0.406]
         self.std = [0.229, 0.224, 0.225]
-        self.pathloss_scaler = pathloss_scaler
         self.min_antenna_gain = min_antenna_gain
 
     def normalize_input(self, input_tensor):
-        """
-        Apply all normalizations to input tensor
-        
-        Args:
-            input_tensor: 6-channel input tensor 
-                          [reflectance, transmittance, fspl, distance, antenna_gain, frequency]
-        
-        Returns:
-            Fully normalized input tensor
-        """
         normalized = input_tensor.clone()
         for i in range(2):
             normalized[i] = (normalized[i] / 255.0 - self.mean[i]) / self.std[i]
@@ -43,161 +44,10 @@ class PathlossNormalizer:
         normalized[5] = normalized[5] / 100.0 # this feature mask has values < 300
 
         return normalized
-    
-    def normalize_output(self, y):
-        """Scale pathloss into [-1, 1]."""
-        return 2.0 * (y / self.pathloss_scaler) - 1.0
-    
-    def denormalize_output(self, y):
-        """Inverse of the above scaling."""
-        return (y + 1.0) / 2.0 * self.pathloss_scaler
-
-
-
-@njit
-def calculate_transmittance_loss(transmittance_matrix, x_ant, y_ant, 
-                                 n_angles=360*128/1, radial_step=1.0, max_walls=10):
-    """
-    Approximate the loss from an antenna at (x_ant, y_ant) to every pixel in 'transmittance_matrix'
-    using a polar (angle + radial stepping) algorithm.
-    
-    Now we finalize a nonzero block only when we see the first zero after it,
-    rather than incrementing sum_loss on the first pixel of that block.
-    """
-    h, w = transmittance_matrix.shape
-    dtheta = 2.0 * np.pi / n_angles
-    output = np.zeros((h, w), dtype=transmittance_matrix.dtype)
-    
-    cos_vals = np.cos(np.arange(n_angles) * dtheta)
-    sin_vals = np.sin(np.arange(n_angles) * dtheta)
-    max_dist = np.sqrt(w*w + h*h)
-    
-    for i in range(n_angles):
-        cos_t = cos_vals[i]
-        sin_t = sin_vals[i]
-        
-        sum_loss = 0.0
-        last_val = None
-        wall_count = 0
-        r = 0.0
-        
-        while r <= max_dist:
-            x = x_ant + r * cos_t
-            y = y_ant + r * sin_t
-            
-            px = int(round(x))
-            py = int(round(y))
-            
-            # Exiting the grid
-            if px < 0 or px >= w or py < 0 or py >= h:
-                # If we leave bounds while still in a nonzero block, finalize it.
-                if last_val is not None and last_val > 0:
-                    sum_loss += last_val
-                    wall_count += 1
-                    if wall_count >= max_walls:
-                        pass  # Already out of bounds, so we do nothing more
-                break
-            
-            val = transmittance_matrix[py, px]
-            
-            # Initialize last_val on first pixel
-            if last_val is None:
-                last_val = val
-            
-            # If the pixel value changed
-            if val != last_val:
-                # We only finalize if we are *leaving* a nonzero block and see a zero
-                # i.e., last_val>0 and new val==0
-                if last_val > 0 and val == 0:
-                    sum_loss += last_val
-                    wall_count += 1
-                    if wall_count >= max_walls:
-                        r_temp = r
-                        while r_temp <= max_dist:
-                            x_temp = x_ant + r_temp * cos_t
-                            y_temp = y_ant + r_temp * sin_t
-                            px_temp = int(round(x_temp))
-                            py_temp = int(round(y_temp))
-                            
-                            if px_temp < 0 or px_temp >= w or py_temp < 0 or py_temp >= h:
-                                break
-                            
-                            if output[py_temp, px_temp] == 0 or sum_loss < output[py_temp, px_temp]:
-                                output[py_temp, px_temp] = sum_loss
-                            r_temp += radial_step
-                        break
-                last_val = val
-            
-            # Update output (still store the best/lowest sum_loss for this pixel)
-            if output[py, px] == 0 or (sum_loss < output[py, px]):
-                output[py, px] = sum_loss
-            
-            r += radial_step
-    
-    return output
-
-
-# compiling numba function for better performance
-calculate_transmittance_loss(np.array([[1]]), 0, 0)
-
-
-def calculate_fspl(
-    W,
-    H,
-    x_ant,
-    y_ant,
-    antenna_gain,           # shape=(360,) antenna gain in dBi [0..359]
-    freq_MHz,               # frequency in MHz
-    grid_unit_meters=0.25,  # cell size in meters
-    min_distance_m=0.125,     # clamp distance below this
-):
-    """
-    Example free-space pathloss calculation with distance clamping.
-    """
-    y_idx, x_idx = np.indices((H, W))
-
-    dx = x_idx - x_ant
-    dy = y_idx - y_ant
-
-    dist_m = np.sqrt(dx**2 + dy**2) * grid_unit_meters
-    dist_clamped = np.maximum(dist_m, min_distance_m)
-
-    fspl_db = 20.0 * np.log10(dist_clamped) + 20.0 * np.log10(freq_MHz) - 27.55
-
-    pathloss_db = fspl_db - antenna_gain
-    return pathloss_db
-
-
-def calculate_antenna_gain(radiation_pattern, W, H, azimuth, x_ant, y_ant):
-    x_grid = np.repeat(np.linspace(0, W-1, W), H, axis=0).reshape(W, H).T
-    y_grid = np.repeat(np.linspace(0, H-1, H), W, axis=0).reshape(H, W)
-    
-    angles = -(180/np.pi) * np.arctan2((y_ant - y_grid), (x_ant - x_grid)) + 180 + azimuth
-    angles = np.where(angles > 359, angles - 360, angles).astype(int)
-    antenna_gain = radiation_pattern[angles]
-    return antenna_gain
-
 
 
 class PathlossDataset(Dataset):
-    """
-    Pads input/output to 640 x 640 and returns a mask indicating the valid region.
-    Includes a free-space pathloss calculation function for future use.
-    """
-    def __init__(self, file_list, input_path, positions_path, 
-                 buildings_path, radiation_path, output_path=None, img_size=640, training=False, load_output=True):
-        """
-        Args:
-            file_list: List of file IDs (b, ant, f, sp)
-            input_path: Path to input images
-            output_path: Path to ground truth pathloss maps. Optional, skipped in inference
-            positions_path: Path to antenna positions
-            buildings_path: Path to building details
-            radiation_path: Path to radiation patterns
-            img_size: We will pad up to exactly 640 x 640
-            training: If True, we normalize outputs to [-1,1]
-        """
-
+    def __init__(self, file_list, input_path, positions_path, buildings_path, radiation_path, output_path=None, img_size=640, training=False, load_output=True):
         self.training = training
         self.file_list = file_list
         self.input_path = input_path
@@ -208,142 +58,114 @@ class PathlossDataset(Dataset):
         self.radiation_path = radiation_path
         self.normalizer = PathlossNormalizer()
         
-        # Frequencies
+        self.target_size = img_size
         self.freqs_MHz = [868, 1800, 3500]
 
-        # We'll pad up to this size
-        self.target_size = img_size
 
     def __len__(self):
         return len(self.file_list)
-    
-    def pad(self, input_tensor, output_tensor):
-        n_input_channels, H, W = input_tensor.size()
 
-        padH = padW = self.target_size
-        if H > padH or W > padW:
-            raise ValueError(f"Cannot pad to {padH}: image is bigger ({H}x{W}). Either crop or pick a larger pad size.")
-        
-        padded_input = torch.zeros((n_input_channels, padH, padW), dtype=input_tensor.dtype)
-        padded_input[:, :H, :W] = input_tensor
+    def idx_to_ids(self, idx):
+        return self.file_list[idx]
 
-        padded_output = torch.zeros((padH, padW), dtype=output_tensor.dtype)
-        padded_output[:H, :W] = output_tensor
-
-        mask = torch.zeros((padH, padW), dtype=torch.bool)
-        mask[:H, :W] = True
-
-        return padded_input, padded_output, mask
-    
-    def rotate_and_crop(self, input_img, output_img):
-        k = np.random.randint(0, 3)  # 0 -> 0°, 1 -> 90°, 2 -> 180°, 3 -> 270°
-        output_rot = torch.rot90(output_img, k)
-        input_rot = torch.rot90(input_img, k, [1, 2])
-        return input_rot, output_rot
-    
-    def resize(self, img, H, W, in_db=True):
-        img = 10.0 ** (img / 10.0) if in_db else img
-
-        img = img.unsqueeze(0)
-        img = TF.resize(img, [H, W], interpolation=TF.InterpolationMode.BILINEAR)
-        img = img.squeeze(0)
-        
-        img = 10.0 * torch.log10(img) if in_db else img
-        return img
-    
-    def __getitem__(self, idx):
-        b, ant, f, sp = self.file_list[idx]
-        
+    def read_sample(self, b, ant, f, sp):
         input_file = f"B{b}_Ant{ant}_f{f}_S{sp}.png"
         output_file = f"B{b}_Ant{ant}_f{f}_S{sp}.png"
-        position_file = f"Positions_B{b}_Ant{ant}_f{f}.csv"
-        building_file = f"B{b}_Details.csv"
         radiation_file = f"Ant{ant}_Pattern.csv"
+        position_file = f"Positions_B{b}_Ant{ant}_f{f}.csv"
         
-        if not all([
-            os.path.exists(os.path.join(self.input_path, input_file)),
-            os.path.exists(os.path.join(self.positions_path, position_file)),
-            os.path.exists(os.path.join(self.buildings_path, building_file)),
-            os.path.exists(os.path.join(self.radiation_path, radiation_file))
-        ]):
-            raise ValueError(f"Warning: Some files missing for B{b}_Ant{ant}_f{f}_S{sp}")
-        
-        sampling_positions = pd.read_csv(os.path.join(self.positions_path, position_file))
-        building_details = pd.read_csv(os.path.join(self.buildings_path, building_file))
-        radiation_pattern = np.genfromtxt(os.path.join(self.radiation_path, radiation_file), delimiter=',')
         input_img = imread(os.path.join(self.input_path, input_file))   # shape [H, W, channels]
-        output_img = None
-        if self.load_output:
-            output_path = os.path.join(self.output_path, output_file)
-            if not output_file or not os.path.exists(output_path):
-                raise ValueError(f"output_path must be a valid existing path during training. Instead got {output_file!r}")
-            output_img = imread(output_path)
-            output_tensor = torch.from_numpy(output_img.astype(np.float32))
-            if self.training:
-                output_tensor = self.normalizer.normalize_output(output_tensor)
-
-
+        H, W = input_img.shape[:2]
+        if not self.load_output:
+            output_img = None
+        else:
+            output_img = imread(os.path.join(self.output_path, output_file))
         freq_MHz = self.freqs_MHz[int(f)-1]
-        x_min, x_max, y_min, y_max, W, H = building_details.iloc[0].astype(int).to_list()
+        sampling_positions = pd.read_csv(os.path.join(self.positions_path, position_file))
+        x_ant, y_ant, azimuth = sampling_positions.loc[int(sp), ["Y", "X", "Azimuth"]]
+        radiation_pattern = np.genfromtxt(os.path.join(self.radiation_path, radiation_file), delimiter=',')
+
+        sample = RadarSample(
+            H,
+            W,
+            x_ant,
+            y_ant,
+            azimuth,
+            freq_MHz,
+            input_img,
+            output_img,
+            radiation_pattern,
+        )
         
-        x_ant = sampling_positions["Y"].loc[int(sp)]
-        y_ant = sampling_positions["X"].loc[int(sp)]
-        azimuth = sampling_positions['Azimuth'].iloc[int(sp)]
+        return sample
 
-        reflectance = torch.from_numpy(input_img[:, :, 0]).to(torch.float32)
-        transmittance = torch.from_numpy(input_img[:, :, 1]).to(torch.float32)
-        distance = torch.from_numpy(input_img[:, :, 2]).to(torch.float32)
+    def _normalize_size(self, sample: RadarSample) -> Tuple[RadarSample, np.ndarray]:
+        scale_factor = min(self.target_size / sample.H, self.target_size / sample.W)
+        new_h, new_w = int(sample.H * scale_factor), int(sample.W * scale_factor)
 
-        orig_max_dim = max(W, H)
-        if orig_max_dim < self.target_size:
-            scale = self.target_size / float(orig_max_dim)
-            new_W = int(round(W * scale))
-            new_H = int(round(H * scale))
+        new_size = (new_h, new_w)
+        reflectance = sample.input_img[:,:,0]
+        transmittance = sample.input_img[:,:,1]
+        distance = sample.input_img[:,:,2]
+        
+        distance = resize_linear(distance, new_size)
+        reflectance = resize_nearest(reflectance, new_size)
+        transmittance = resize_nearest(transmittance, new_size)
+        
+        sample.x_ant *= scale_factor
+        sample.y_ant *= scale_factor
+        resized_input = np.stack([reflectance, transmittance, distance], axis=2)
+        if sample.output_img is not None:
+            sample.output_img = resize_db(sample.output_img, new_size)
+        
+        sample.input_img = np.zeros((self.target_size, self.target_size, 3), dtype=np.float32)
+        sample.input_img[:new_h, :new_w, :] = resized_input
+        
 
-            reflectance = self.resize(reflectance, new_H, new_W)
-            transmittance = self.resize(transmittance, new_H, new_W)
-            distance = self.resize(distance, new_H, new_W, in_db=False)
+        if sample.output_img is not None:
+            padded_output = np.zeros((self.target_size, self.target_size), dtype=np.float32)
+            padded_output[:new_h, :new_w] = sample.output_img
+            sample.output_img = padded_output
+        
+        mask = np.zeros((self.target_size, self.target_size), dtype=np.float32)
+        mask[:new_h, :new_w] = 1
+        
+        sample.H = sample.W = self.target_size  # Update to full padded dimensions
+        
+        return sample, mask
 
-            if self.load_output:
-                output_tensor = self.resize(output_tensor, new_H, new_W)
+    def __getitem__(self, idx):
+        b, ant, f, sp = self.file_list[idx]
+        sample = self.read_sample(b, ant, f, sp)
+        sample, mask = self._normalize_size(sample)
 
-            W, H = new_W, new_H
-            x_ant *= scale
-            y_ant *= scale
+        output_tensor = torch.from_numpy(sample.output_img.astype(np.float32))
+        reflectance = torch.from_numpy(sample.input_img[:,:,0]).to(torch.float32)
+        transmittance = torch.from_numpy(sample.input_img[:,:,1]).to(torch.float32)
+        distance = torch.from_numpy(sample.input_img[:,:,2]).to(torch.float32)
 
-        antenna_gain = calculate_antenna_gain(radiation_pattern, W, H, azimuth, x_ant, y_ant)
+        # calculating new features from them
+        antenna_gain = calculate_antenna_gain(sample.radiation_pattern, sample.W, sample.H, sample.azimuth, sample.x_ant, sample.y_ant)
         free_space_pathloss = calculate_fspl(
-            W, H, x_ant, y_ant, antenna_gain, freq_MHz
+            sample.W, sample.H, sample.x_ant, sample.y_ant, antenna_gain, sample.freq_MHz
         )
 
-        transmittance_loss = calculate_transmittance_loss(transmittance.numpy(), x_ant, y_ant)
+        transmittance_loss = calculate_transmittance_loss(transmittance.numpy(), sample.x_ant, sample.y_ant)
         fs_plus_transmittance_loss = free_space_pathloss + transmittance_loss
 
-        # Build input tensor: [6, H, W]
-        input_tensor = np.zeros((7, H, W), dtype=np.float32)
+        # Build input tensor: [7, H, W]
+        input_tensor = np.zeros((7, sample.H, sample.W), dtype=np.float32)
         input_tensor[0] = reflectance  # reflectance
-        input_tensor[1] =  transmittance # transmittance
+        input_tensor[1] = transmittance # transmittance
         input_tensor[2] = distance # distance
         input_tensor[3] = antenna_gain
-        input_tensor[4] = freq_MHz  # constant freq map
+        input_tensor[4] = sample.freq_MHz  # constant freq map
         input_tensor[5] = fs_plus_transmittance_loss
 
         input_tensor = torch.from_numpy(input_tensor)
         input_tensor = self.normalizer.normalize_input(input_tensor)
+        
+        # Add mask to the last channel
+        input_tensor[6] = torch.from_numpy(mask).to(torch.float32)
 
-        if self.training:
-            input_tensor, output_tensor = self.rotate_and_crop(input_tensor, output_tensor) 
-        padded_input, padded_output, mask = self.pad(
-            input_tensor=input_tensor,
-            output_tensor=output_tensor,
-        )
-
-        padded_input[6] = mask
-
-        return padded_input, padded_output, mask
-
-
-
-
-
-
+        return input_tensor, output_tensor, mask
