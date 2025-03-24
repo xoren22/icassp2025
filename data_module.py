@@ -3,9 +3,9 @@ import torch
 import numpy as np
 import pandas as pd
 from typing import Tuple
-from skimage.io import imread
 from dataclasses import dataclass
 from torch.utils.data import Dataset
+from torchvision.io import read_image
 
 from featurizer import *
 from augmentations import resize_db, resize_nearest, resize_linear
@@ -19,9 +19,9 @@ class RadarSample:
     y_ant: float
     azimuth: float
     freq_MHz: float
-    input_img: np.ndarray  
-    output_img: np.ndarray
-    radiation_pattern: np.array
+    input_img: torch.Tensor  # In format (C, H, W)
+    output_img: torch.Tensor  # In format (H, W) or (1, H, W)
+    radiation_pattern: torch.Tensor
 
 
 class PathlossNormalizer:
@@ -30,17 +30,17 @@ class PathlossNormalizer:
             min_antenna_gain=-55.0,
         ):
         # ImageNet stats for the first three channels
-        self.mean = [0.485, 0.456, 0.406]
-        self.std = [0.229, 0.224, 0.225]
+        self.mean = torch.tensor([0.485, 0.456, 0.406])
+        self.std = torch.tensor([0.229, 0.224, 0.225])
         self.min_antenna_gain = min_antenna_gain
 
     def normalize_input(self, input_tensor):
         normalized = input_tensor.clone()
         for i in range(2):
             normalized[i] = (normalized[i] / 255.0 - self.mean[i]) / self.std[i]
-        normalized[2] = np.log10(1 + normalized[2])
+        normalized[2] = torch.log10(1 + normalized[2])
         normalized[3] = normalized[3] / self.min_antenna_gain
-        normalized[4] = np.log10(normalized[4]) - 1.9  # "magic shift"
+        normalized[4] = torch.log10(normalized[4]) - 1.9  # "magic shift"
         normalized[5] = normalized[5] / 100.0 # this feature mask has values < 300
 
         return normalized
@@ -74,16 +74,26 @@ class PathlossDataset(Dataset):
         radiation_file = f"Ant{ant}_Pattern.csv"
         position_file = f"Positions_B{b}_Ant{ant}_f{f}.csv"
         
-        input_img = imread(os.path.join(self.input_path, input_file))   # shape [H, W, channels]
-        H, W = input_img.shape[:2]
+        # Read input image directly as torch tensor (C, H, W)
+        input_img = read_image(os.path.join(self.input_path, input_file)).to(torch.float32)
+        C, H, W = input_img.shape
+        
         if not self.load_output:
             output_img = None
         else:
-            output_img = imread(os.path.join(self.output_path, output_file))
+            # Read output image directly as torch tensor
+            output_img = read_image(os.path.join(self.output_path, output_file)).to(torch.float32)
+            if output_img.size(0) == 1:  # If single channel, remove channel dimension
+                output_img = output_img.squeeze(0)
+            
         freq_MHz = self.freqs_MHz[int(f)-1]
         sampling_positions = pd.read_csv(os.path.join(self.positions_path, position_file))
         x_ant, y_ant, azimuth = sampling_positions.loc[int(sp), ["Y", "X", "Azimuth"]]
-        radiation_pattern = np.genfromtxt(os.path.join(self.radiation_path, radiation_file), delimiter=',')
+        
+        # Convert CSV data to torch tensor
+        # We could alternatively use pandas directly to torch.tensor if desired
+        radiation_pattern_np = np.genfromtxt(os.path.join(self.radiation_path, radiation_file), delimiter=',')
+        radiation_pattern = torch.from_numpy(radiation_pattern_np).to(torch.float32)
 
         sample = RadarSample(
             H,
@@ -99,38 +109,40 @@ class PathlossDataset(Dataset):
         
         return sample
 
-    def _normalize_size(self, sample: RadarSample) -> Tuple[RadarSample, np.ndarray]:
-        scale_factor = min(self.target_size / sample.H, self.target_size / sample.W)
-        new_h, new_w = int(sample.H * scale_factor), int(sample.W * scale_factor)
-
+    def _normalize_size(self, sample: RadarSample) -> Tuple[RadarSample, torch.Tensor]:
+        C, H, W = sample.input_img.shape
+        scale_factor = min(self.target_size / H, self.target_size / W)
+        new_h, new_w = int(H * scale_factor), int(W * scale_factor)
         new_size = (new_h, new_w)
-        reflectance = sample.input_img[:,:,0]
-        transmittance = sample.input_img[:,:,1]
-        distance = sample.input_img[:,:,2]
         
-        distance = resize_linear(distance, new_size)
-        reflectance = resize_nearest(reflectance, new_size)
-        transmittance = resize_nearest(transmittance, new_size)
+        reflectance = sample.input_img[0:1]  # First channel with dimension [1, H, W]
+        transmittance = sample.input_img[1:2]  # Second channel with dimension [1, H, W]
+        distance = sample.input_img[2:3]  # Third channel with dimension [1, H, W]
+        
+        reflectance_resized = resize_nearest(reflectance, new_size)
+        transmittance_resized = resize_nearest(transmittance, new_size)
+        distance_resized = resize_linear(distance, new_size)
         
         sample.x_ant *= scale_factor
         sample.y_ant *= scale_factor
-        resized_input = np.stack([reflectance, transmittance, distance], axis=2)
+        
+        resized_input = torch.cat([reflectance_resized, transmittance_resized, distance_resized], dim=0)
+        
         if sample.output_img is not None:
-            sample.output_img = resize_db(sample.output_img, new_size)
-        
-        sample.input_img = np.zeros((self.target_size, self.target_size, 3), dtype=np.float32)
-        sample.input_img[:new_h, :new_w, :] = resized_input
-        
+            sample.output_img = resize_db(sample.output_img.unsqueeze(0), new_size).squeeze(0)
 
+        sample.input_img = torch.zeros((C, self.target_size, self.target_size), dtype=torch.float32)
+        sample.input_img[:, :new_h, :new_w] = resized_input
+        
         if sample.output_img is not None:
-            padded_output = np.zeros((self.target_size, self.target_size), dtype=np.float32)
+            padded_output = torch.zeros((self.target_size, self.target_size), dtype=torch.float32)
             padded_output[:new_h, :new_w] = sample.output_img
             sample.output_img = padded_output
         
-        mask = np.zeros((self.target_size, self.target_size), dtype=np.float32)
+        mask = torch.zeros((self.target_size, self.target_size), dtype=torch.float32)
         mask[:new_h, :new_w] = 1
-        
-        sample.H = sample.W = self.target_size  # Update to full padded dimensions
+
+        sample.H = sample.W = self.target_size
         
         return sample, mask
 
@@ -139,33 +151,51 @@ class PathlossDataset(Dataset):
         sample = self.read_sample(b, ant, f, sp)
         sample, mask = self._normalize_size(sample)
 
-        output_tensor = torch.from_numpy(sample.output_img.astype(np.float32))
-        reflectance = torch.from_numpy(sample.input_img[:,:,0]).to(torch.float32)
-        transmittance = torch.from_numpy(sample.input_img[:,:,1]).to(torch.float32)
-        distance = torch.from_numpy(sample.input_img[:,:,2]).to(torch.float32)
+        output_tensor = sample.output_img if sample.output_img is not None else None
+        
+        reflectance = sample.input_img[0]  # First channel
+        transmittance = sample.input_img[1]  # Second channel
+        distance = sample.input_img[2]  # Third channel
 
-        # calculating new features from them
-        antenna_gain = calculate_antenna_gain(sample.radiation_pattern, sample.W, sample.H, sample.azimuth, sample.x_ant, sample.y_ant)
+        antenna_gain = calculate_antenna_gain(
+            sample.radiation_pattern, 
+            sample.W, 
+            sample.H, 
+            sample.azimuth, 
+            sample.x_ant, 
+            sample.y_ant
+        )
+        
         free_space_pathloss = calculate_fspl(
-            sample.W, sample.H, sample.x_ant, sample.y_ant, antenna_gain, sample.freq_MHz
+            sample.W, 
+            sample.H, 
+            sample.x_ant, 
+            sample.y_ant, 
+            antenna_gain, 
+            sample.freq_MHz
         )
 
-        transmittance_loss = calculate_transmittance_loss(transmittance.numpy(), sample.x_ant, sample.y_ant)
+        transmittance_loss = calculate_transmittance_loss(
+            transmittance, 
+            sample.x_ant, 
+            sample.y_ant
+        )
+        
         fs_plus_transmittance_loss = free_space_pathloss + transmittance_loss
 
-        # Build input tensor: [7, H, W]
-        input_tensor = np.zeros((7, sample.H, sample.W), dtype=np.float32)
+        # Build input tensor: [7, H, W] - Already in correct (C, H, W) format
+        input_tensor = torch.zeros((7, sample.H, sample.W), dtype=torch.float32)
         input_tensor[0] = reflectance  # reflectance
-        input_tensor[1] = transmittance # transmittance
-        input_tensor[2] = distance # distance
+        input_tensor[1] = transmittance  # transmittance
+        input_tensor[2] = distance  # distance
         input_tensor[3] = antenna_gain
-        input_tensor[4] = sample.freq_MHz  # constant freq map
+        input_tensor[4] = torch.full((sample.H, sample.W), sample.freq_MHz, dtype=torch.float32)  # constant freq map
         input_tensor[5] = fs_plus_transmittance_loss
 
-        input_tensor = torch.from_numpy(input_tensor)
+        # Normalize the input tensor
         input_tensor = self.normalizer.normalize_input(input_tensor)
         
         # Add mask to the last channel
-        input_tensor[6] = torch.from_numpy(mask).to(torch.float32)
+        input_tensor[6] = mask
 
         return input_tensor, output_tensor, mask
