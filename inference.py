@@ -33,6 +33,7 @@ class PathlossPredictor:
         norm_h, norm_w = int(old_h*scaling_factor), int(old_w*scaling_factor)
         
         input_tensor = featurizer(sample)
+        input_tensor = input_tensor.to(next(self.model.parameters()).device)
         with torch.no_grad():
             pred = self.model(input_tensor.unsqueeze(0)).squeeze(0)
         pred = pred[torch.where(mask == 1)].reshape((norm_h, norm_w))

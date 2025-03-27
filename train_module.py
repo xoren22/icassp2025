@@ -1,53 +1,40 @@
 import os
 import gc
 import torch
+import numpy as np
+from time import time
 from tqdm import tqdm
+from torchvision.io import read_image
 from torch.amp import autocast, GradScaler
 
+from inference import PathlossPredictor
 from loss import rmse, se, create_sip2net_loss
 
 
-def evaluate_model(model, val_loader, logger, device, use_sip2net=False):
-    model.eval()
+def evaluate_model(model, val_samples, logger, device, use_sip2net=False):
+    inference_model = PathlossPredictor(model=model)
 
     preds_list, masks_list, targets_list = [], [], []
 
     with torch.no_grad():
-        for inputs, targets, masks in val_loader:
-            inputs, targets, masks = inputs.to(device), targets.to(device), masks.to(device)
+        for i, sample in tqdm(enumerate(val_samples), "Evaluating validation set: "):
+            sample = sample.asdict()
+            target = read_image(sample.pop("output_file")).float()
+            pred = inference_model.predict(sample)
+            if i < 3:
+                logger.writer.add_image(f"validation/sample_{i}_target", target, logger.global_step)
+                logger.writer.add_image(f"validation/sample_{i}_prediction", pred[None, :, :], logger.global_step)
 
-            preds = model(inputs)
-            preds_list.append(preds.cpu())
-            targets_list.append(targets.cpu())
-            masks_list.append(masks.cpu())
+            preds_list += list(pred.cpu().numpy().flatten())
+            targets_list += list(target.cpu().numpy().flatten())
 
-    preds_all = torch.cat(preds_list, dim=0)
-    masks_all = torch.cat(masks_list, dim=0)
-    targets_all = torch.cat(targets_list, dim=0)
-
-    val_rmse = rmse(preds_all, targets_all, masks_all).item()
-
-    # Log SIP2Net components if used
-    if use_sip2net:
-        with torch.no_grad():
-            _, components = create_sip2net_loss()(preds_all, targets_all, masks_all)
-            logger.writer.add_scalar("val/sip2net_loss", components['sip2net_loss'], logger.global_step)
-
-    with torch.no_grad():
-        for i in [0, 1, 2]:
-            inp, tgt, msk = val_loader.dataset[i]  # single sample
-            inp = inp.unsqueeze(0).to(device)
-            pred = model(inp)
-            tgt_cpu = tgt.cpu() / 255 # normalizing to get into range 0,1 
-            pred_cpu = pred.cpu().squeeze(0) / 255
-
-            logger.writer.add_image(f"validation/sample_{i}_prediction", pred_cpu.unsqueeze(0), logger.global_step)
-            logger.writer.add_image(f"validation/sample_{i}_target", tgt_cpu.unsqueeze(0), logger.global_step)
+    preds_np, targets_np = np.array(preds_list), np.array(targets_list)
+    val_rmse = np.sqrt(np.mean(np.square(preds_np - targets_np)))
 
     return val_rmse
 
 
-def train_model(model, train_loader, val_loader, optimizer, scheduler, num_epochs, save_dir, logger, device=None, use_sip2net=False, sip2net_params=None):
+def train_model(model, train_loader, val_samples, optimizer, scheduler, num_epochs, save_dir, logger, device=None, use_sip2net=False, sip2net_params=None):
     os.makedirs(save_dir, exist_ok=True)
     model.to(device)
     best_loss = float('inf')
@@ -98,9 +85,9 @@ def train_model(model, train_loader, val_loader, optimizer, scheduler, num_epoch
             del inputs, targets, masks, preds, batch_se, batch_mse, loss, mask_sum
             torch.cuda.empty_cache()
 
-
-        val_loss = evaluate_model(model, val_loader, logger=logger, device=device, use_sip2net=use_sip2net)
-        print(f"Validation RMSE: {val_loss}")
+        t0 = time()
+        val_loss = evaluate_model(model, val_samples, logger=logger, device=device, use_sip2net=use_sip2net)
+        print(f"Validation RMSE: {val_loss} taking {time() - t0}")
 
         current_lr = optimizer.param_groups[0]['lr']
         scheduler.step(val_loss)
