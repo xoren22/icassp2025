@@ -8,7 +8,7 @@ from torchvision.io import read_image
 from torch.amp import autocast, GradScaler
 
 from inference import PathlossPredictor
-from loss import rmse, se, create_sip2net_loss
+from loss import se, create_sip2net_loss
 
 
 def evaluate_model(model, val_samples, logger, device, use_sip2net=False):
@@ -32,7 +32,6 @@ def evaluate_model(model, val_samples, logger, device, use_sip2net=False):
     val_rmse = np.sqrt(np.mean(np.square(preds_np - targets_np)))
 
     return val_rmse
-
 
 def train_model(model, train_loader, val_samples, optimizer, scheduler, num_epochs, save_dir, logger, device=None, use_sip2net=False, sip2net_params=None):
     os.makedirs(save_dir, exist_ok=True)

@@ -42,7 +42,7 @@ def rotate_db(img, angle):
 
 def normalize_size(sample: RadarSample, target_size) -> RadarSample:
     if sample.x_ant < 0 or sample.x_ant >= sample.W or sample.y_ant < 0 or sample.y_ant >= sample.H:
-        print(f"Warning: antenna coords out of range. (x_ant={sample.x_ant}, y_ant={sample.y_ant}), (W={sample.W}, H={sample.H}) -> clamping to valid range.")
+        # print(f"Warning: antenna coords out of range. (x_ant={sample.x_ant}, y_ant={sample.y_ant}), (W={sample.W}, H={sample.H}) -> clamping to valid range.")
         sample.x_ant = max(0, min(sample.x_ant, sample.W - 1))
         sample.y_ant = max(0, min(sample.y_ant, sample.H - 1))
     C, H, W = sample.input_img.shape

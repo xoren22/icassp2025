@@ -1,11 +1,10 @@
 import torch
-import os
-from typing import Union, Dict
+from typing import List, Union, Dict
 
 from utils import load_model
 from featurizer import featurizer
 from _types import RadarSampleInputs
-from augmentations import normalize_size, resize_db
+from augmentations import normalize_size, resize_linear
 from data_module import read_sample, IMG_TARGET_SIZE, INITIAL_PIXEL_SIZE
 
 
@@ -23,44 +22,97 @@ class PathlossPredictor:
             raise ValueError("Either model or model_ckpt_path must be provided")
         self.model.eval()
     
-    def predict(self, input_sample: Union[Dict, RadarSampleInputs]):
-        sample = read_sample(input_sample)
-        old_h, old_w = sample.H, sample.W
-        sample = normalize_size(sample, IMG_TARGET_SIZE)
-        
-        mask = sample.mask
-        scaling_factor = INITIAL_PIXEL_SIZE / sample.pixel_size
-        norm_h, norm_w = int(old_h*scaling_factor), int(old_w*scaling_factor)
-        
-        input_tensor = featurizer(sample)
-        input_tensor = input_tensor.to(next(self.model.parameters()).device)
-        with torch.no_grad():
-            pred = self.model(input_tensor.unsqueeze(0)).squeeze(0)
-        pred = pred[torch.where(mask == 1)].reshape((norm_h, norm_w))
-        pred = resize_db(pred.unsqueeze(0), new_size=(old_h, old_w)).squeeze(0)
+    def predict(
+        self,
+        input_samples: Union[Dict, RadarSampleInputs, List[Union[Dict, RadarSampleInputs]]],
+    ):
+        """
+        If a single sample is passed, processes one sample.
+        If a list of samples is passed, processes them in a batch.
+        """
+        single_input = False
+        if not isinstance(input_samples, list):
+            input_samples = [input_samples]
+            single_input = True
 
-        return pred
+        device = next(self.model.parameters()).device
+
+        masks = []
+        old_hw_dims = []
+        norm_hw_dims = []
+        batched_tensors = []
+
+        for sample_input in input_samples:
+            sample = read_sample(sample_input)
+            old_h, old_w = sample.H, sample.W
+
+            sample = normalize_size(sample, IMG_TARGET_SIZE)
+            
+            mask = sample.mask
+            scaling_factor = INITIAL_PIXEL_SIZE / sample.pixel_size
+            norm_h, norm_w = int(old_h * scaling_factor), int(old_w * scaling_factor)
+
+            input_tensor = featurizer(sample).to(device)
+
+            batched_tensors.append(input_tensor)
+
+            masks.append(mask)
+            old_hw_dims.append((old_h, old_w))
+            norm_hw_dims.append((norm_h, norm_w))
+
+        batch_tensor = torch.stack(batched_tensors, dim=0)  # [B, C, H, W]
+
+        with torch.no_grad():
+            preds = self.model(batch_tensor)  
+
+        results = []
+        for i in range(len(input_samples)):
+            pred_i = preds[i]  # shape ~ [C, H, W]
+            mask_i = masks[i]
+            (old_h, old_w) = old_hw_dims[i]
+            (norm_h, norm_w) = norm_hw_dims[i]
+
+            pred_i = pred_i.squeeze(0)  # -> [H, W]
+            pred_i = pred_i[torch.where(mask_i == 1)].reshape(norm_h, norm_w)
+
+            pred_i = resize_linear(pred_i.unsqueeze(0), new_size=(old_h, old_w)).squeeze(0)
+
+            results.append(pred_i)
+
+        if single_input:
+            return results[0]
+        else:
+            return results
 
 
 if __name__ == "__main__":
     model_path = '/auto/home/xoren/icassp2025/models/best_model.pth'
 
-    sample = {
-        'freq_MHz': 868, 
+    # Example input 1
+    sample1 = {
+        'freq_MHz': 868,
         'ids': (1, 1, 1, 0),
-        'sampling_position': 0, 
-        'input_file': '/auto/home/xoren/icassp2025/data/Inputs/Task_2_ICASSP/B1_Ant1_f1_S0.png', 
-        # 'output_file': '/auto/home/xoren/icassp2025/data/Outputs/Task_2_ICASSP/B1_Ant1_f1_S0.png', 
-        'position_file': '/auto/home/xoren/icassp2025/data/Positions/Positions_B1_Ant1_f1.csv', 
-        'radiation_pattern_file': '/auto/home/xoren/icassp2025/data/Radiation_Patterns/Ant1_Pattern.csv', 
+        'sampling_position': 0,
+        'input_file': '/auto/home/xoren/icassp2025/data/Inputs/Task_2_ICASSP/B1_Ant1_f1_S0.png',
+        'position_file': '/auto/home/xoren/icassp2025/data/Positions/Positions_B1_Ant1_f1.csv',
+        'radiation_pattern_file': '/auto/home/xoren/icassp2025/data/Radiation_Patterns/Ant1_Pattern.csv',
     }
 
-    model = PathlossPredictor(
-        model_ckpt_path=model_path,
-    )
+    sample2 = {
+        'freq_MHz': 868,
+        'ids': (2, 1, 1, 0),
+        'sampling_position': 0,
+        'input_file': '/auto/home/xoren/icassp2025/data/Inputs/Task_2_ICASSP/B2_Ant1_f1_S0.png',
+        'position_file': '/auto/home/xoren/icassp2025/data/Positions/Positions_B2_Ant1_f1.csv',
+        'radiation_pattern_file': '/auto/home/xoren/icassp2025/data/Radiation_Patterns/Ant1_Pattern.csv',
+    }
 
-    pred = model.predict(
-        sample
-    )
+    model = PathlossPredictor(model_ckpt_path=model_path)
 
-    print(pred.shape)
+    # Single prediction
+    single_pred = model.predict(sample1)
+    print("Single prediction shape:", single_pred.shape)
+
+    # Batched prediction
+    batched_pred = model.predict([sample1, sample2])
+    print("Batched prediction shapes:", [bp.shape for bp in batched_pred])
