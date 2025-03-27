@@ -11,27 +11,37 @@ from inference import PathlossPredictor
 from loss import se, create_sip2net_loss
 
 
-def evaluate_model(model, val_samples, logger, device, use_sip2net=False):
+def evaluate_model(model, val_samples, device, batch_size=8):
     inference_model = PathlossPredictor(model=model)
+    inference_model.model.to(device)  # if not already on device
 
-    preds_list, masks_list, targets_list = [], [], []
+    preds_list, targets_list = [], []
+    val_samples = list(val_samples)
+
+    all_inputs, all_targets = [], []
+    for sample in val_samples:
+        d = sample.asdict()
+        target = read_image(d.pop("output_file")).float()
+        all_inputs.append(d)
+        all_targets.append(target)
 
     with torch.no_grad():
-        for i, sample in tqdm(enumerate(val_samples), "Evaluating validation set: "):
-            sample = sample.asdict()
-            target = read_image(sample.pop("output_file")).float()
-            pred = inference_model.predict(sample)
-            if i < 3:
-                logger.writer.add_image(f"validation/sample_{i}_target", target, logger.global_step)
-                logger.writer.add_image(f"validation/sample_{i}_prediction", pred[None, :, :], logger.global_step)
+        for start_idx in tqdm(range(0, len(all_inputs), batch_size), desc="Evaluating validation set"):
+            end_idx = start_idx + batch_size
+            batch_inputs = all_inputs[start_idx:end_idx]
+            batch_targets = all_targets[start_idx:end_idx]
 
-            preds_list += list(pred.cpu().numpy().flatten())
-            targets_list += list(target.cpu().numpy().flatten())
+            batch_preds = inference_model.predict(batch_inputs)
+            for pred_i, target_i in zip(batch_preds, batch_targets):
+                preds_list.extend(pred_i.cpu().numpy().ravel())
+                targets_list.extend(target_i.cpu().numpy().ravel())
 
-    preds_np, targets_np = np.array(preds_list), np.array(targets_list)
-    val_rmse = np.sqrt(np.mean(np.square(preds_np - targets_np)))
+    preds_np = np.array(preds_list)
+    targets_np = np.array(targets_list)
+    val_rmse = np.sqrt(np.mean((np.square(preds_np - targets_np))))
 
     return val_rmse
+
 
 def train_model(model, train_loader, val_samples, optimizer, scheduler, num_epochs, save_dir, logger, device=None, use_sip2net=False, sip2net_params=None):
     os.makedirs(save_dir, exist_ok=True)
@@ -85,7 +95,7 @@ def train_model(model, train_loader, val_samples, optimizer, scheduler, num_epoc
             torch.cuda.empty_cache()
 
         t0 = time()
-        val_loss = evaluate_model(model, val_samples, logger=logger, device=device, use_sip2net=use_sip2net)
+        val_loss = evaluate_model(model, val_samples, device=device)
         print(f"Validation RMSE: {val_loss} taking {time() - t0}")
 
         current_lr = optimizer.param_groups[0]['lr']
