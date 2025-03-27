@@ -93,24 +93,18 @@ class BaseAugmentation:
 
 class GeometricAugmentation(BaseAugmentation):
     def __init__(
-            self, 
+            self,
             p: float = 0.5,
-            flip_vertical: bool = False, 
-            flip_horizontal: bool = False, 
+            flip_vertical: bool = False,
+            flip_horizontal: bool = False,
             angle_range: Optional[Tuple[float, float]] = None,
-            scale_range: Optional[Tuple[float, float]] = None, 
-        ):
-        """
-        Args:
-            angle_range: Range of rotation angles in degrees, None to disable rotation
-            flip_horizontal: Enable horizontal flipping
-            flip_vertical: Enable vertical flipping
-            scale_range: Range of scale factors, None to disable scaling
-            p: Overall probability of applying at least one augmentation
-        """
+            cardinal_rotation: bool = False,
+            scale_range: Optional[Tuple[float, float]] = None,
+    ):
         self.p = p
         self.scale_range = scale_range
         self.angle_range = angle_range
+        self.cardinal_rotation = cardinal_rotation
         self.flip_horizontal = flip_horizontal
         self.flip_vertical = flip_vertical
     
@@ -122,6 +116,7 @@ class GeometricAugmentation(BaseAugmentation):
 
         sample.input_img[2] = scaled_distances
         sample.output_img += fspl_adjustment
+        sample.pixel_size *= scale_factor
         
         return sample
     
@@ -189,44 +184,63 @@ class GeometricAugmentation(BaseAugmentation):
             sample.azimuth = (360 - sample.azimuth) % 360
             
         return sample
+    
+    def _apply_cardinal_rotation(self, sample: RadarSample) -> RadarSample:
+        """
+        Rotate by one of {90, 180, 270} degrees *losslessly* using torch.rot90.
+        We also must update x_ant, y_ant, azimuth accordingly.
+        """
+        # Randomly choose 90°, 180°, or 270° (k=1,2,3). If you want to allow 0°, add k=0.
+        k = random.choice([1, 2, 3])
+
+        old_H, old_W = sample.H, sample.W
+        sample.input_img = torch.rot90(sample.input_img, k, (1, 2))
+        new_H, new_W = sample.input_img.shape[1], sample.input_img.shape[2]
+
+        if k == 1: # 90 deg counter-clockwise
+            new_x = sample.y_ant
+            new_y = old_W - sample.x_ant - 1
+            sample.azimuth = (sample.azimuth + 90) % 360
+        elif k == 2: # 180 deg
+            new_x = old_W - sample.x_ant - 1
+            new_y = old_H - sample.y_ant - 1
+            sample.azimuth = (sample.azimuth + 180) % 360
+        elif k == 3:  # 270 deg
+            new_x = old_H - sample.y_ant - 1
+            new_y = sample.x_ant
+            sample.azimuth = (sample.azimuth + 270) % 360
+
+        sample.x_ant, sample.y_ant = new_x, new_y
+        if sample.output_img is not None:
+            sample.output_img = torch.rot90(sample.output_img, k, (0, 1))
+        if sample.mask is not None:
+            sample.mask = torch.rot90(sample.mask, k, (0, 1))
+
+        sample.H, sample.W = new_H, new_W
+        return sample
 
     def __call__(self, sample: RadarSample) -> RadarSample:
-        """Apply geometric augmentations to the sample.
-        
-        This method orchestrates the application of scaling, rotation, and flipping
-        transformations in a consistent order. It determines which transformations
-        to apply and with what parameters, then delegates the actual application
-        to specialized methods.
-        
-        Args:
-            sample: RadarSample instance
-            
-        Returns:
-            Augmented RadarSample instance
-        """
-        # Decide whether to apply any augmentation
         if random.random() > self.p:
             return sample
-            
-        
-        # 1. Determine scaling parameters and apply if enabled
+
         if self.scale_range is not None:
             scale_factor = random.uniform(*self.scale_range)
             sample = self._apply_distance_scaling(sample, scale_factor)
-        
-        # 2. Determine rotation parameters and apply if enabled
+
+        if self.cardinal_rotation:
+            sample = self._apply_cardinal_rotation(sample)
+
         if self.angle_range is not None:
             angle = random.uniform(*self.angle_range)
             sample = self._apply_rotation(sample, angle)
-        
-        # 3. Determine flipping parameters and apply if enabled
-        flip_h = self.flip_horizontal and random.random() < 0.5
-        flip_v = self.flip_vertical and random.random() < 0.5
-        
+
+        flip_h = self.flip_horizontal and (random.random() < 0.5)
+        flip_v = self.flip_vertical and (random.random() < 0.5)
         if flip_h or flip_v:
             sample = self._apply_flipping(sample, flip_h, flip_v)
-        
+
         return sample
+
 
 class AugmentationPipeline:
     """Pipeline for applying multiple augmentations in sequence"""

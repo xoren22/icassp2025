@@ -18,7 +18,7 @@ def main():
     
     parser.add_argument('--gpu', type=int, default=None, help='GPU ID to use (default: auto-select)')
     parser.add_argument('--batch_size', type=int, default=8, help='Batch size for training')
-    parser.add_argument('--epochs', type=int, default=200, help='Number of epochs to train')
+    parser.add_argument('--epochs', type=int, default=2000, help='Number of epochs to train')
     parser.add_argument('--lr', type=float, default=3e-4, help='Learning rate')
     parser.add_argument('--data_dir', type=str, default='data', help='Data directory')
     parser.add_argument('--model_dir', type=str, default='models', help='Directory to save models')
@@ -71,10 +71,11 @@ def main():
         [
             GeometricAugmentation(
                 p=0.5,
-                angle_range=(-50, 50),
-                scale_range=(0.2, 5),
+                angle_range=(-30, 30),
+                scale_range=(1/1.5, 1.5),
                 flip_vertical=True,
                 flip_horizontal=True,
+                cardinal_rotation=True,
             ),
         ]
     )
