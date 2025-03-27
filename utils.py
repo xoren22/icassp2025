@@ -4,10 +4,12 @@ import time
 import torch
 import numpy as np
 import pickle as pkl
+from typing import List
 import matplotlib.pyplot as plt
 from contextlib import contextmanager
 
 from model import UNetModel
+from _types import RadarSampleInputs
 
 
 @contextmanager
@@ -110,9 +112,24 @@ def load_model(weights_path=None, device=None):
     print(f"Loaded model params from '{weights_path}' and moved to device '{device}")
     return model
 
+def fname_to_ids(fnames, list):
+    if not isinstance(fnames):
+        fnames = [fnames]
+    ids = [list(map(int, re.findall(r"\d+", fname.split(".")[0]))) for fname in fnames]
+    if len(fnames) == 1:
+        return ids[0]
+    return ids
 
-def split_data_task1(files_list, val_ratio=0.25, split_save_path=None, seed=None):
-    building_ids = list(set([f[0] for f in files_list]))
+
+def check_tensor_device(tensor, name, expected_device='cpu'):
+    if tensor.device.type != expected_device:
+        print(f"WARNING: {name} is on {tensor.device} but should be on {expected_device}")
+        return False
+    return True
+
+
+def split_data_task1(inputs_list: List[RadarSampleInputs], val_ratio=0.25, split_save_path=None, seed=None):
+    building_ids = list(set([f.ids[0] for f in inputs_list]))
     np.random.seed(seed=seed)
     np.random.shuffle(building_ids)
 
@@ -125,68 +142,35 @@ def split_data_task1(files_list, val_ratio=0.25, split_save_path=None, seed=None
     val_buildings = building_ids[:n_buildings_valid]
     train_buildings = building_ids[n_buildings_valid:]
 
-    val_files, train_files = [], []
-    for f in files_list:
-        if f[0] in val_buildings:
-            val_files.append(f)
+    val_inputs, train_inputs = [], []
+    for f in inputs_list:
+        if f.ids[0] in val_buildings:
+            val_inputs.append(f)
         else:
-            train_files.append(f)
+            train_inputs.append(f)
     if split_save_path:
         with open(split_save_path, "wb") as f:
             split_dict = {
-                "val_files": val_files,
-                "train_files": train_files,
+                "val_inputs": val_inputs,
+                "train_inputs": train_inputs,
             }
             pkl.dump(split_dict, f)
-    return train_files, val_files
+    return train_inputs, val_inputs
 
 
 
-def split_data_task2(files_list, val_freqs, split_save_path=None):
-    train_files, val_files = split_data_task1(files_list)
+def split_data_task2(inputs_list: List[RadarSampleInputs], val_freqs, split_save_path=None):
+    train_inputs, val_inputs = split_data_task1(inputs_list)
     val_freqs = val_freqs if isinstance(val_freqs, list) else [val_freqs]
-    val_files = [f for f in val_files if f[2] in val_freqs]
-    train_files = [f for f in train_files if f[2] not in val_freqs]
+    val_inputs = [f for f in val_inputs if f.ids[2] in val_freqs]
+    train_inputs = [f for f in train_inputs if f.ids[2] not in val_freqs]
 
     if split_save_path:
         with open(split_save_path, "wb") as fp:
             pkl.dump({
-                "train_files": train_files, 
-                "val_files": val_files,
+                "train_inputs": train_inputs, 
+                "val_inputs": val_inputs,
                 "val_freqs": val_freqs}, fp
             )
-    return train_files, val_files
-
-
-def split_data_task3(files_list, val_freqs, val_antennas, split_save_path=None):
-    val_freqs = val_freqs if isinstance(val_freqs, list) else [val_freqs]
-    val_antennas = val_antennas if isinstance(val_antennas, list) else [val_antennas]
-
-    train, val = [], []
-    for f in files_list:
-        if f[2] in val_freqs or f[1] in val_antennas:
-            val.append(f)
-        else:
-            train.append(f)
-    if split_save_path:
-        with open(split_save_path, "wb") as fp:
-            pkl.dump({"train_files": train, "val_files": val,
-                      "val_freqs": val_freqs,
-                      "val_antennas": val_antennas}, fp)
-    return train, val
-
-
-def fname_to_ids(fnames, list):
-    if not isinstance(fnames):
-        fnames = [fnames]
-    ids = [list(map(int, re.findall(r"\d+", fname.split(".")[0]))) for fname in fnames]
-    if len(fnames) == 1:
-        return ids[0]
-    return ids
-
-def check_tensor_device(tensor, name, expected_device='cpu'):
-    if tensor.device.type != expected_device:
-        print(f"WARNING: {name} is on {tensor.device} but should be on {expected_device}")
-        return False
-    return True
+    return train_inputs, val_inputs
 

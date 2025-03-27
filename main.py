@@ -8,6 +8,7 @@ from model import UNetModel
 from logger import TrainingLogger
 from utils import split_data_task2
 from train_module import train_model
+from _types import RadarSampleInputs
 from data_module import PathlossDataset
 from augmentations import AugmentationPipeline, GeometricAugmentation
 
@@ -38,6 +39,7 @@ def main():
         torch.cuda.empty_cache()
     
     # Define paths
+    freqs_MHz = [868, 1800, 3500]
     BASE_DIR = os.path.dirname(os.path.abspath(__file__))
     DATA_DIR = os.path.join(BASE_DIR, args.data_dir)
     INPUT_PATH = os.path.join(DATA_DIR, f"Inputs/Task_2_ICASSP/")
@@ -47,7 +49,7 @@ def main():
     RADIATION_PATTERNS_PATH = os.path.join(DATA_DIR, "Radiation_Patterns/")
     MODEL_SAVE_PATH = os.path.join(BASE_DIR, args.model_dir)
     
-    file_list = []
+    inputs_list = []
     for b in range(1, 26):  # 25 buildings
         for ant in range(1, 3):  # 2 antenna types
             for f in range(1, 4):  # 3 frequencies
@@ -58,13 +60,37 @@ def main():
                     
                     if os.path.exists(os.path.join(INPUT_PATH, input_file)) and \
                        os.path.exists(os.path.join(OUTPUT_PATH, output_file)):
-                        file_list.append((b, ant, f, sp))
+                        input_file = f"B{b}_Ant{ant}_f{f}_S{sp}.png"
+                        output_file = f"B{b}_Ant{ant}_f{f}_S{sp}.png"
+                        radiation_file = f"Ant{ant}_Pattern.csv"
+                        position_file = f"Positions_B{b}_Ant{ant}_f{f}.csv"
+
+                        freq_MHz = freqs_MHz[f-1]
+                        input_img_path = os.path.join(INPUT_PATH, input_file)
+                        output_img_path = os.path.join(OUTPUT_PATH, output_file)
+                        positions_path = os.path.join(POSITIONS_PATH, position_file)
+                        
+                        radiation_pattern_file = os.path.join(RADIATION_PATTERNS_PATH, radiation_file)
+
+                        radar_sample_inputs = RadarSampleInputs(
+                            freq_MHz=freq_MHz,
+                            input_file=input_img_path,
+                            output_file=output_img_path,
+                            position_file=positions_path,
+                            radiation_pattern_file=radiation_pattern_file,
+                            sampling_position=sp,
+                            ids=(b, ant, f, sp),
+                        )
+                        inputs_list.append(radar_sample_inputs)
+
+
+
 
     logger = TrainingLogger()
     print(f"\nLogging results at {logger.log_dir}\n\n")
 
     split_save_path=os.path.join(logger.log_dir, "train_val_split.pkl")
-    train_files, val_files = split_data_task2(file_list, val_freqs=2, split_save_path=split_save_path)
+    train_files, val_files = split_data_task2(inputs_list, val_freqs=2, split_save_path=split_save_path)
     print(f"Train: {len(train_files)}, Validation: {len(val_files)}")
     
     augmentations = AugmentationPipeline(
@@ -79,25 +105,9 @@ def main():
             ),
         ]
     )
-    train_dataset = PathlossDataset(
-        file_list=train_files, 
-        input_path=INPUT_PATH, 
-        output_path=OUTPUT_PATH, 
-        positions_path=POSITIONS_PATH, 
-        buildings_path=BUILDING_DETAILS_PATH, 
-        radiation_path=RADIATION_PATTERNS_PATH, 
-        load_output=True, training=True, augmentations=augmentations,
-    )
     
-    val_dataset = PathlossDataset(
-        file_list=val_files, 
-        input_path=INPUT_PATH, 
-        output_path=OUTPUT_PATH, 
-        positions_path=POSITIONS_PATH, 
-        buildings_path=BUILDING_DETAILS_PATH, 
-        radiation_path=RADIATION_PATTERNS_PATH, 
-        load_output=True, training=False
-    )
+    val_dataset = PathlossDataset(inputs_list=val_files, load_output=True, training=False)
+    train_dataset = PathlossDataset(inputs_list=train_files, load_output=True, training=True, augmentations=augmentations)
     
     val_loader = DataLoader(val_dataset, batch_size=args.batch_size, shuffle=False, num_workers=args.num_workers)
     train_loader = DataLoader(train_dataset, batch_size=args.batch_size, shuffle=True, num_workers=args.num_workers)
