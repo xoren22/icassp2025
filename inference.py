@@ -1,81 +1,65 @@
 import torch
-import pickle as pkl
+import os
+from typing import Union, Dict
 
-from data_module import PathlossDataset
-from utils import matrix_to_image, load_model
+from utils import load_model
+from featurizer import featurizer
+from _types import RadarSampleInputs
+from augmentations import normalize_size, resize_db
+from data_module import read_sample, IMG_TARGET_SIZE, INITIAL_PIXEL_SIZE
 
 
-def run_inference(
-    model_ckpt_path,
-    b, ant, f, sp,
-    input_path,
-    output_path,
-    positions_path,
-    buildings_path,
-    radiation_path,
-):
-    model = load_model(model_ckpt_path)
-    model.eval()
+class PathlossPredictor:
+    def __init__(
+        self,
+        model=None,
+        model_ckpt_path=None,
+    ):
+        if model is not None:
+            self.model = model
+        elif model_ckpt_path is not None:
+            self.model = load_model(model_ckpt_path)
+        else:
+            raise ValueError("Either model or model_ckpt_path must be provided")
+        self.model.eval()
     
-    file_list = [(b, ant, f, sp)]
-    dataset = PathlossDataset(
-        training=False,
-        load_output=True,
-        file_list=file_list,
-        input_path=input_path,
-        output_path=output_path,       # or None if truly unused
-        positions_path=positions_path,
-        buildings_path=buildings_path,
-        radiation_path=radiation_path
-    )
-    
-    input_tensor, output_tensor, mask = dataset[0]
-    input_tensor = input_tensor.unsqueeze(0)
-    with torch.no_grad():
-        preds = model(input_tensor)
-    
-    y_indices, x_indices = mask.squeeze(0).nonzero(as_tuple=True)
-    y_min, y_max = y_indices.min(), y_indices.max() + 1
-    x_min, x_max = x_indices.min(), x_indices.max() + 1
+    def predict(self, input_sample: Union[Dict, RadarSampleInputs]):
+        sample = read_sample(input_sample)
+        old_h, old_w = sample.H, sample.W
+        sample = normalize_size(sample, IMG_TARGET_SIZE)
+        
+        mask = sample.mask
+        scaling_factor = INITIAL_PIXEL_SIZE / sample.pixel_size
+        norm_h, norm_w = int(old_h*scaling_factor), int(old_w*scaling_factor)
+        
+        input_tensor = featurizer(sample)
+        with torch.no_grad():
+            pred = self.model(input_tensor.unsqueeze(0)).squeeze(0)
+        pred = pred[torch.where(mask == 1)].reshape((norm_h, norm_w))
+        pred = resize_db(pred.unsqueeze(0), new_size=(old_h, old_w)).squeeze(0)
 
-    valid_preds = preds[0, y_min:y_max, x_min:x_max]
-    valid_outputs = output_tensor[y_min:y_max, x_min:x_max]
-
-    return valid_preds, valid_outputs
+        return pred
 
 
 if __name__ == "__main__":
     model_path = '/auto/home/xoren/icassp2025/models/best_model.pth'
-    split_path = "logs/2025-03-13_20-08-26/train_val_split.pkl"
-    with open(split_path, "rb") as f:
-        split = pkl.load(f)
-        val_files = split['val_files']
-    
-    # Example building/antenna/freq/position
-    t   = 2
-    idx = 0
-    b, ant, f, sp = val_files[idx]
-    
-    base_dir       = "/auto/home/xoren/icassp2025/"
-    input_path     = base_dir + f"data/Inputs/Task_{t}_ICASSP/"
-    output_path    = base_dir + f"data/Outputs/Task_{t}_ICASSP/" 
-    positions_path = base_dir + "data/Positions"
-    buildings_path = base_dir + "data/Building_Details"
-    radiation_path = base_dir + "data/Radiation_Patterns"
 
-    pred, true = run_inference(
-        b=b,
-        ant=ant,
-        f=f,
-        sp=sp,
-        input_path=input_path,
-        output_path=output_path,
+    sample = {
+        'freq_MHz': 868, 
+        'ids': (1, 1, 1, 0),
+        'sampling_position': 0, 
+        'input_file': '/auto/home/xoren/icassp2025/data/Inputs/Task_2_ICASSP/B1_Ant1_f1_S0.png', 
+        # 'output_file': '/auto/home/xoren/icassp2025/data/Outputs/Task_2_ICASSP/B1_Ant1_f1_S0.png', 
+        'position_file': '/auto/home/xoren/icassp2025/data/Positions/Positions_B1_Ant1_f1.csv', 
+        'radiation_pattern_file': '/auto/home/xoren/icassp2025/data/Radiation_Patterns/Ant1_Pattern.csv', 
+    }
+
+    model = PathlossPredictor(
         model_ckpt_path=model_path,
-        positions_path=positions_path,
-        buildings_path=buildings_path,
-        radiation_path=radiation_path,
     )
 
-    name = f"B{b}_Ant{ant}_f{f}_S{sp}_Task{t}_2.png"
-    save_path = f"/auto/home/xoren/icassp2025/foo/{name}"
-    matrix_to_image(true, pred, titles=["Ground Truth", f"Prediction"], save_path=save_path)
+    pred = model.predict(
+        sample
+    )
+
+    print(pred.shape)

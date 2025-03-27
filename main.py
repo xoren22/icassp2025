@@ -126,7 +126,7 @@ def main():
         num_epochs=args.epochs, 
         logger=logger, 
         device=device, 
-        save_dir=MODEL_SAVE_PATH,
+        save_dir=MODEL_SAVE_PATH, # "/dev/null"
         use_sip2net=True,
     )
 
