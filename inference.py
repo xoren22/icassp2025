@@ -86,33 +86,33 @@ class PathlossPredictor:
 
 
 if __name__ == "__main__":
+    import numpy as np
+    import pickle as pkl
+    from skimage.io import imread
+    from utils import matrix_to_image
+
     model_path = '/auto/home/xoren/icassp2025/models/best_model.pth'
-
-    # Example input 1
-    sample1 = {
-        'freq_MHz': 868,
-        'ids': (1, 1, 1, 0),
-        'sampling_position': 0,
-        'input_file': '/auto/home/xoren/icassp2025/data/Inputs/Task_2_ICASSP/B1_Ant1_f1_S0.png',
-        'position_file': '/auto/home/xoren/icassp2025/data/Positions/Positions_B1_Ant1_f1.csv',
-        'radiation_pattern_file': '/auto/home/xoren/icassp2025/data/Radiation_Patterns/Ant1_Pattern.csv',
-    }
-
-    sample2 = {
-        'freq_MHz': 868,
-        'ids': (2, 1, 1, 0),
-        'sampling_position': 0,
-        'input_file': '/auto/home/xoren/icassp2025/data/Inputs/Task_2_ICASSP/B2_Ant1_f1_S0.png',
-        'position_file': '/auto/home/xoren/icassp2025/data/Positions/Positions_B2_Ant1_f1.csv',
-        'radiation_pattern_file': '/auto/home/xoren/icassp2025/data/Radiation_Patterns/Ant1_Pattern.csv',
-    }
+    split_file = '/auto/home/xoren/icassp2025/logs/2025-03-28_02-10-49/train_val_split.pkl'
+    with open(split_file, "rb") as f:
+        split = pkl.load(f)
+    
+    val_samples = [s.asdict() for s in split["val_inputs"]]
+   
+    val_samples = list(np.random.choice(val_samples, 3))
+    val_targets = [torch.from_numpy(imread(s.pop("output_file"))).to(torch.float32) for s in val_samples]
 
     model = PathlossPredictor(model_ckpt_path=model_path)
+    batched_pred = model.predict(val_samples)
+    for s, pred, tgt in zip(val_samples, batched_pred, val_targets):
+        b, ant, f, sp = s['ids']
+        fname = f"B{b}_Ant{ant}_f{f}_S{sp}.png"
+        save_path = f"/auto/home/xoren/icassp2025/foo/{fname}"
+        matrix_to_image(tgt, pred, save_path=save_path)
 
-    # Single prediction
-    single_pred = model.predict(sample1)
-    print("Single prediction shape:", single_pred.shape)
+    print("\n\nBatched prediction shapes:", [bp.shape for bp in batched_pred])
 
-    # Batched prediction
-    batched_pred = model.predict([sample1, sample2])
-    print("Batched prediction shapes:", [bp.shape for bp in batched_pred])
+    tgt_samples_flat = np.concatenate([A.flatten() for A in val_targets])
+    pred_samples_flat = np.concatenate([A.flatten() for A in batched_pred])
+    
+    val_rmse = np.sqrt(np.mean(np.square(pred_samples_flat - tgt_samples_flat)))
+    print(f"RMSE : {val_rmse}")

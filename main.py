@@ -21,7 +21,7 @@ def main():
     parser.add_argument('--batch_size', type=int, default=8, help='Batch size for training')
     parser.add_argument('--epochs', type=int, default=2000, help='Number of epochs to train')
     parser.add_argument('--lr', type=float, default=3e-4, help='Learning rate')
-    parser.add_argument('--data_dir', type=str, default='data', help='Data directory')
+    parser.add_argument('--data_dir', type=str, default='data/train/', help='Data directory')
     parser.add_argument('--model_dir', type=str, default='models', help='Directory to save models')
     
     args = parser.parse_args()
@@ -34,9 +34,8 @@ def main():
     
     print(f"Using device: {device}")
     
-    # Clear CUDA cache at the start
-    if torch.cuda.is_available():
-        torch.cuda.empty_cache()
+    # if torch.cuda.is_available():
+    #     torch.cuda.empty_cache()
     
     # Define paths
     freqs_MHz = [868, 1800, 3500]
@@ -45,7 +44,6 @@ def main():
     INPUT_PATH = os.path.join(DATA_DIR, f"Inputs/Task_2_ICASSP/")
     OUTPUT_PATH = os.path.join(DATA_DIR, f"Outputs/Task_2_ICASSP/")
     POSITIONS_PATH = os.path.join(DATA_DIR, "Positions/")
-    BUILDING_DETAILS_PATH = os.path.join(DATA_DIR, "Building_Details/")
     RADIATION_PATTERNS_PATH = os.path.join(DATA_DIR, "Radiation_Patterns/")
     MODEL_SAVE_PATH = os.path.join(BASE_DIR, args.model_dir)
     
@@ -90,7 +88,7 @@ def main():
     print(f"\nLogging results at {logger.log_dir}\n\n")
 
     split_save_path=os.path.join(logger.log_dir, "train_val_split.pkl")
-    train_files, val_files = split_data_task2(inputs_list, val_freqs=2, split_save_path=split_save_path)
+    train_files, val_files = split_data_task2(inputs_list, val_freqs=None, split_save_path=split_save_path)
     print(f"Train: {len(train_files)}, Validation: {len(val_files)}")
     
     augmentations = AugmentationPipeline(

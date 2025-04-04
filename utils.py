@@ -60,7 +60,7 @@ def evaluate_fspl(output_img, fspl):
 
 def matrix_to_image(*matrices, titles=None, save_path=None):
     n = abs(int(matrices[1].sum()))
-    save_path = save_path or f"foo/1_{n}.png"
+    save_path = save_path or f"/auto/home/xoren/icassp2025/foo/1_{n}.png"
     if len(matrices) < 2:
         raise ValueError("At least two matrices are required: 1 ground truth + 1 comparison.")
 
@@ -68,7 +68,7 @@ def matrix_to_image(*matrices, titles=None, save_path=None):
     others = matrices[1:]
     n = len(others)
     if not titles or len(titles) != n:
-        titles = [f"Matrix {i+1}" for i in range(n)]
+        titles = [f"Prediction" for i in range(n)]
 
     diffs = []
     for mat in others:
