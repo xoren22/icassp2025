@@ -277,7 +277,7 @@ class AugmentationPipeline:
     def __init__(self, augmentations: List[BaseAugmentation], p=None, training: bool = True):
         self.training = training
         self.augmentations = augmentations
-        self.p = p or [1.0 for _ in augmentations]
+        self.p = p #or [1.0 for _ in augmentations]
 
         
     def __call__(self, sample: RadarSample, all_samples: List[RadarSample]) -> RadarSample:
@@ -290,6 +290,10 @@ class AugmentationPipeline:
         #     elif isinstance(aug, BaseAugmentation):
         #         sample = aug(sample)
 
+        total_p = sum(self.p)
+        if total_p < random.random():
+            return sample
+        
         augmentation = random.choices(self.augmentations, weights=self.p, k=1)[0]
         if isinstance(augmentation, CompositeAugmentation):
             augmented_item = augmentation(sample, all_samples)
