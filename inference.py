@@ -26,10 +26,9 @@ class PathlossPredictor:
         self,
         input_samples: Union[Dict, RadarSampleInputs, List[Union[Dict, RadarSampleInputs]]],
     ):
-        """
-        If a single sample is passed, processes one sample.
-        If a list of samples is passed, processes them in a batch.
-        """
+        if not hasattr(self, 'sample_cache'):
+            self.sample_cache = {}
+        
         single_input = False
         if not isinstance(input_samples, list):
             input_samples = [input_samples]
@@ -43,46 +42,55 @@ class PathlossPredictor:
         batched_tensors = []
 
         for sample_input in input_samples:
-            sample = read_sample(sample_input)
-            old_h, old_w = sample.H, sample.W
-
-            sample = normalize_size(sample, IMG_TARGET_SIZE)
+            cache_key = sample_input.get('input_file', str(hash(str(sample_input))))
             
-            mask = sample.mask
-            scaling_factor = INITIAL_PIXEL_SIZE / sample.pixel_size
-            norm_h, norm_w = int(old_h * scaling_factor), int(old_w * scaling_factor)
+            if cache_key in self.sample_cache:
+                cached = self.sample_cache[cache_key]
+                batched_tensors.append(cached['tensor'])
+                masks.append(cached['mask'])
+                old_hw_dims.append(cached['old_hw'])
+                norm_hw_dims.append(cached['norm_hw'])
+            else:
+                sample = read_sample(sample_input)
+                old_h, old_w = sample.H, sample.W
+                sample = normalize_size(sample, IMG_TARGET_SIZE)
+                mask = sample.mask
+                scaling_factor = INITIAL_PIXEL_SIZE / sample.pixel_size
+                norm_h, norm_w = int(old_h * scaling_factor), int(old_w * scaling_factor)
+                input_tensor = featurizer(sample).to(device)
+                
+                self.sample_cache[cache_key] = {
+                    'tensor': input_tensor,
+                    'mask': mask,
+                    'old_hw': (old_h, old_w),
+                    'norm_hw': (norm_h, norm_w)
+                }
+                
+                batched_tensors.append(input_tensor)
+                masks.append(mask)
+                old_hw_dims.append((old_h, old_w))
+                norm_hw_dims.append((norm_h, norm_w))
 
-            input_tensor = featurizer(sample).to(device)
-
-            batched_tensors.append(input_tensor)
-
-            masks.append(mask)
-            old_hw_dims.append((old_h, old_w))
-            norm_hw_dims.append((norm_h, norm_w))
-
-        batch_tensor = torch.stack(batched_tensors, dim=0)  # [B, C, H, W]
-
+        batch_tensor = torch.stack(batched_tensors, dim=0)
         with torch.no_grad():
-            preds = self.model(batch_tensor)  
+            preds = self.model(batch_tensor)
 
         results = []
         for i in range(len(input_samples)):
-            pred_i = preds[i]  # shape ~ [C, H, W]
+            pred_i = preds[i]
             mask_i = masks[i]
             (old_h, old_w) = old_hw_dims[i]
             (norm_h, norm_w) = norm_hw_dims[i]
-
-            pred_i = pred_i.squeeze(0)  # -> [H, W]
+            pred_i = pred_i.squeeze(0)
             pred_i = pred_i[torch.where(mask_i == 1)].reshape(norm_h, norm_w)
-
             pred_i = resize_linear(pred_i.unsqueeze(0), new_size=(old_h, old_w)).squeeze(0)
-
             results.append(pred_i)
 
         if single_input:
             return results[0]
         else:
-            return results
+            return results 
+
 
 
 if __name__ == "__main__":

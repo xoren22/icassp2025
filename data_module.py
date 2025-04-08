@@ -1,7 +1,7 @@
-import os
 import torch
 import numpy as np
 import pandas as pd
+from tqdm import tqdm
 from typing import Union
 from torch.utils.data import Dataset
 from torchvision.io import read_image
@@ -76,7 +76,7 @@ class PathlossDataset(Dataset):
     
     def _preprocess_samples(self, inputs_list):
         samples = []
-        for inp in inputs_list:
+        for inp in tqdm(inputs_list, "Preprocessing samples: "):
             sample = read_sample(inp)
             sample = normalize_size(sample=sample, target_size=self.target_size)
             samples.append(sample)
