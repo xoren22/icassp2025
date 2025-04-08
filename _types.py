@@ -17,6 +17,7 @@ class RadarSample:
     radiation_pattern: torch.Tensor
     pixel_size: float = 0.25
     mask: Union[torch.Tensor, None] = None
+    ids: Optional[Tuple[int, int, int, int]] = None
 
 
 @dataclass

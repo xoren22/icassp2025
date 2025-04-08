@@ -17,6 +17,7 @@ def read_sample(inputs: Union[RadarSampleInputs, dict]):
     if isinstance(inputs, RadarSampleInputs):
         inputs = inputs.asdict()
 
+    ids = inputs["ids"]
     freq_MHz = inputs["freq_MHz"]
     input_file = inputs["input_file"]
     output_file = inputs.get("output_file")
@@ -40,6 +41,7 @@ def read_sample(inputs: Union[RadarSampleInputs, dict]):
     radiation_pattern = torch.from_numpy(radiation_pattern_np).float()
 
     sample = RadarSample(
+        ids=ids,
         H=H,
         W=W,
         x_ant=x_ant,
@@ -70,19 +72,24 @@ class PathlossDataset(Dataset):
 
         self.target_size = IMG_TARGET_SIZE
         self.featurizer = featurizer
+        self.samples = self._preprocess_samples(self.inputs_list)
     
-
-
+    def _preprocess_samples(self, inputs_list):
+        samples = []
+        for inp in inputs_list:
+            sample = read_sample(inp)
+            sample = normalize_size(sample=sample, target_size=self.target_size)
+            samples.append(sample)
+        return samples
+    
     def __len__(self):
         return len(self.inputs_list)
 
 
     def __getitem__(self, idx):
-        inp = self.inputs_list[idx]
-        sample = read_sample(inp)
-        sample = normalize_size(sample=sample, target_size=self.target_size)
+        sample = self.samples[idx]
         if self.augmentations is not None:
-            sample = self.augmentations(sample)
+            sample = self.augmentations(sample, self.samples)
 
         output_tensor = sample.output_img if sample.output_img is not None else None
         input_tensor = self.featurizer(sample=sample)

@@ -6,6 +6,7 @@ import torchvision.transforms.functional as TF
 from torchvision.transforms.functional import InterpolationMode
 
 from _types import RadarSample
+from utils import matrix_to_image
 
 
 def resize_nearest(img, new_size):
@@ -37,6 +38,15 @@ def rotate_db(img, angle):
     valid_mask = lin_rs > 0
     img_rs[valid_mask] = 10.0 * torch.log10(lin_rs[valid_mask])
     return img_rs
+
+
+def calculate_distance(x_ant, y_ant, H, W, pixel_size):
+    y_grid, x_grid = torch.meshgrid(
+        torch.arange(H, dtype=torch.float32, device=torch.device('cpu')),
+        torch.arange(W, dtype=torch.float32, device=torch.device('cpu')),
+        indexing='ij'
+    )
+    return torch.sqrt((x_grid - x_ant)**2 + (y_grid - y_ant)**2) * pixel_size
 
 
 
@@ -77,13 +87,7 @@ def normalize_size(sample: RadarSample, target_size) -> RadarSample:
     sample.mask = torch.zeros((target_size, target_size), dtype=torch.float32, device=torch.device('cpu'))
     sample.mask[:new_h, :new_w] = mask_resized
     
-    y_grid, x_grid = torch.meshgrid(
-        torch.arange(target_size, dtype=torch.float32, device=torch.device('cpu')),
-        torch.arange(target_size, dtype=torch.float32, device=torch.device('cpu')),
-        indexing='ij'
-    )
-    
-    sample.input_img[2, :, :] = torch.sqrt((x_grid - sample.x_ant)**2 + (y_grid - sample.y_ant)**2) * sample.pixel_size
+    sample.input_img[2, :, :] = calculate_distance(sample.x_ant, sample.y_ant, sample.H, sample.W, sample.pixel_size)
 
     return sample
 
@@ -93,19 +97,22 @@ class BaseAugmentation:
     """Base class for all augmentations"""
     def __call__(self, sample: RadarSample) -> RadarSample:
         raise NotImplementedError
+    
+class CompositeAugmentation:
+    """Subclass for all augmentations composite augmentations which mix the sample with other samples."""
+    def __call__(self, sample: RadarSample, all_samples: List[RadarSample]) -> RadarSample:
+        raise NotImplementedError
 
 
 class GeometricAugmentation(BaseAugmentation):
     def __init__(
             self,
-            p: float = 0.5,
             flip_vertical: bool = False,
             flip_horizontal: bool = False,
             angle_range: Optional[Tuple[float, float]] = None,
             cardinal_rotation: bool = False,
             scale_range: Optional[Tuple[float, float]] = None,
     ):
-        self.p = p
         self.scale_range = scale_range
         self.angle_range = angle_range
         self.cardinal_rotation = cardinal_rotation
@@ -138,11 +145,6 @@ class GeometricAugmentation(BaseAugmentation):
 
         reflectance = sample.input_img[0:1]  # (1, H, W)
         transmittance = sample.input_img[1:2]  # (1, H, W)
-        distance = sample.input_img[2:3]  # (1, H, W)
-
-        rot_reflectance = rotate_nearest(reflectance, angle)
-        rot_transmittance = rotate_nearest(transmittance, angle)
-        rot_distance = rotate_nearest(distance, angle)
 
         if sample.output_img is not None:
             out_expanded = sample.output_img.unsqueeze(0)  # (1,H,W)
@@ -154,12 +156,15 @@ class GeometricAugmentation(BaseAugmentation):
             rot_mask = rotate_nearest(mask_expanded, angle).squeeze(0)
             sample.mask = rot_mask
 
-        _, new_H, new_W = rot_reflectance.shape
-        sample.H, sample.W = new_H, new_W
-        sample.input_img = torch.cat([rot_reflectance, rot_transmittance, rot_distance], dim=0)
+        rot_reflectance = rotate_nearest(reflectance, angle)
+        rot_transmittance = rotate_nearest(transmittance, angle)
 
+        _, sample.H, sample.W = rot_reflectance.shape
+        rot_distance = calculate_distance(sample.x_ant, sample.y_ant, sample.H, sample.W, sample.pixel_size)
+
+        sample.input_img = torch.cat([rot_reflectance, rot_transmittance, rot_distance.unsqueeze(0)], dim=0)
         sample = normalize_size(sample=sample, target_size=old_H)
-
+        
         return sample
 
 
@@ -224,9 +229,6 @@ class GeometricAugmentation(BaseAugmentation):
         return sample
 
     def __call__(self, sample: RadarSample) -> RadarSample:
-        if random.random() > self.p:
-            return sample
-
         if self.scale_range is not None:
             scale_factor = random.uniform(*self.scale_range)
             sample = self._apply_distance_scaling(sample, scale_factor)
@@ -246,33 +248,54 @@ class GeometricAugmentation(BaseAugmentation):
         return sample
 
 
+class CompositeAntennaAugmentation(CompositeAugmentation):
+    def __init__(self, multi_antenna=True):
+        self.multi_antenna = multi_antenna
+
+    def __call__(self, sample: RadarSample, all_samples: List[RadarSample]) -> RadarSample:
+        if self.multi_antenna:
+            sample = self._apply_multi_antenna(sample, all_samples)
+
+    def _apply_multi_antenna(self, sample: RadarSample, all_samples: List[RadarSample]) -> RadarSample:
+        random_inds = np.arange(all_samples)
+        np.random.shuffle(random_inds)
+        
+        pair = None
+        for ind in random_inds:
+            pair = all_samples[ind]
+            if pair.ids[:3] == sample.ids[:3]:
+                break
+        if pair is None:
+            raise ValueError(f"Sample with ids {sample.ids} has no pairs!")
+        
+        sample.x_ant = [sample.x_ant, pair.x_ant]
+        sample.y_ant = [sample.y_ant, pair.y_ant]
+        sample.azimuth = [sample.azimuth, pair.azimuth]
+        
+        return
+
+
+
+
 class AugmentationPipeline:
-    """Pipeline for applying multiple augmentations in sequence"""
-    def __init__(self, augmentations: List[BaseAugmentation], training: bool = True):
-        """
-        Args:
-            augmentations: List of augmentation instances
-            training: Whether to apply augmentations (only in training mode)
-        """
+    def __init__(self, augmentations: List[BaseAugmentation], p=None, training: bool = True):
         self.training = training
         self.augmentations = augmentations
+        self.p = p or [1.0 for _ in augmentations]
+
         
-    def __call__(self, sample: RadarSample) -> RadarSample:
-        """Apply all augmentations in sequence to the sample.
-        
-        Args:
-            sample: RadarSample instance
-            
-        Returns:
-            Augmented RadarSample instance
-        """
+    def __call__(self, sample: RadarSample, all_samples: List[RadarSample]) -> RadarSample:
         if not self.training:
             return sample
             
-        # Apply each augmentation in sequence
-        for aug in self.augmentations:
-            sample = aug(sample)
-            
+        for aug, aug_p in zip(self.augmentations, self.p):
+            apply_aug = random.random() < aug_p
+            if not apply_aug:
+                continue
+            if isinstance(aug, CompositeAugmentation):
+                sample = aug(sample, all_samples)
+            elif isinstance(aug, BaseAugmentation):
+                sample = aug(sample)
         return sample
 
 

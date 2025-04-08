@@ -160,7 +160,7 @@ def split_data_task1(inputs_list: List[RadarSampleInputs], val_ratio=0.25, split
 
 
 def split_data_task2(inputs_list: List[RadarSampleInputs], val_freqs, split_save_path=None):
-    # inputs_list = np.random.choice(inputs_list, 100) # TODO remove after debug
+    inputs_list = np.random.choice(inputs_list, 100) # TODO remove after debug
     train_inputs, val_inputs = split_data_task1(inputs_list)
     val_freqs = val_freqs if isinstance(val_freqs, list) else [val_freqs]
     val_inputs = [f for f in val_inputs if f.ids[2] in val_freqs]
