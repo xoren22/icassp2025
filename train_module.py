@@ -12,19 +12,9 @@ from loss import se, create_sip2net_loss
 
 
 def evaluate_model(model, val_samples, device, batch_size=8, inference_model=None):
-    import time
-    total_start = time.time()
-    
-    print(f"Starting validation with {len(val_samples)} samples, batch size {batch_size}")
-    
-    # updating the model
     inference_model.model = model
     inference_model.model.to(device)
-    
-    print(f"Setup time: {time.time() - total_start:.2f}s")
-    
-    # Timing data preparation
-    prep_start = time.time()
+
     preds_list, targets_list = [], []
     val_samples = list(val_samples)
 
@@ -35,39 +25,21 @@ def evaluate_model(model, val_samples, device, batch_size=8, inference_model=Non
         all_inputs.append(d)
         all_targets.append(target)
     
-    print(f"Data preparation time: {time.time() - prep_start:.2f}s")
-
     with torch.no_grad():
         for start_idx in tqdm(range(0, len(all_inputs), batch_size), desc="Evaluating validation set"):
-            batch_start = time.time()
-            
             end_idx = start_idx + batch_size
             batch_inputs = all_inputs[start_idx:end_idx]
             batch_targets = all_targets[start_idx:end_idx]
 
-            print(f"Batch {start_idx//batch_size}: Starting prediction")
-            pred_start = time.time()
             batch_preds = inference_model.predict(batch_inputs)
-            pred_time = time.time() - pred_start
-            print(f"Batch {start_idx//batch_size}: Prediction took {pred_time:.2f}s")
-            
-            extend_start = time.time()
             for pred_i, target_i in zip(batch_preds, batch_targets):
                 preds_list.extend(pred_i.cpu().numpy().ravel())
                 targets_list.extend(target_i.cpu().numpy().ravel())
-            extend_time = time.time() - extend_start
-            
-            batch_time = time.time() - batch_start
-            print(f"Batch {start_idx//batch_size}: Processing took {batch_time:.2f}s (extend: {extend_time:.2f}s)")
 
-    # Add timing for final RMSE calculation
-    rmse_start = time.time()
     preds_np = np.array(preds_list)
     targets_np = np.array(targets_list)
     val_rmse = np.sqrt(np.mean((np.square(preds_np - targets_np))))
-    print(f"RMSE calculation time: {time.time() - rmse_start:.2f}s")
-    
-    print(f"Total validation time: {time.time() - total_start:.2f}s")
+
     return val_rmse
 
 
