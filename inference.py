@@ -26,8 +26,8 @@ class PathlossPredictor:
         self,
         input_samples: Union[Dict, RadarSampleInputs, List[Union[Dict, RadarSampleInputs]]],
     ):
-        if not hasattr(self, 'sample_cache'):
-            self.sample_cache = {}
+        import time
+        total_predict_start = time.time()
         
         single_input = False
         if not isinstance(input_samples, list):
@@ -36,62 +36,69 @@ class PathlossPredictor:
 
         device = next(self.model.parameters()).device
 
+        # Timing preprocessing
+        preprocess_start = time.time()
         masks = []
         old_hw_dims = []
         norm_hw_dims = []
         batched_tensors = []
 
         for sample_input in input_samples:
-            cache_key = sample_input.get('input_file', str(hash(str(sample_input))))
+            sample = read_sample(sample_input)
+            old_h, old_w = sample.H, sample.W
+
+            sample = normalize_size(sample, IMG_TARGET_SIZE)
             
-            if cache_key in self.sample_cache:
-                cached = self.sample_cache[cache_key]
-                batched_tensors.append(cached['tensor'])
-                masks.append(cached['mask'])
-                old_hw_dims.append(cached['old_hw'])
-                norm_hw_dims.append(cached['norm_hw'])
-            else:
-                sample = read_sample(sample_input)
-                old_h, old_w = sample.H, sample.W
-                sample = normalize_size(sample, IMG_TARGET_SIZE)
-                mask = sample.mask
-                scaling_factor = INITIAL_PIXEL_SIZE / sample.pixel_size
-                norm_h, norm_w = int(old_h * scaling_factor), int(old_w * scaling_factor)
-                input_tensor = featurizer(sample).to(device)
-                
-                self.sample_cache[cache_key] = {
-                    'tensor': input_tensor,
-                    'mask': mask,
-                    'old_hw': (old_h, old_w),
-                    'norm_hw': (norm_h, norm_w)
-                }
-                
-                batched_tensors.append(input_tensor)
-                masks.append(mask)
-                old_hw_dims.append((old_h, old_w))
-                norm_hw_dims.append((norm_h, norm_w))
+            mask = sample.mask
+            scaling_factor = INITIAL_PIXEL_SIZE / sample.pixel_size
+            norm_h, norm_w = int(old_h * scaling_factor), int(old_w * scaling_factor)
 
-        batch_tensor = torch.stack(batched_tensors, dim=0)
+            input_tensor = featurizer(sample).to(device)
+
+            batched_tensors.append(input_tensor)
+
+            masks.append(mask)
+            old_hw_dims.append((old_h, old_w))
+            norm_hw_dims.append((norm_h, norm_w))
+        
+        preprocess_time = time.time() - preprocess_start
+        print(f"Preprocessing took {preprocess_time:.2f}s for {len(input_samples)} samples")
+
+        # Timing model inference
+        inference_start = time.time()
+        batch_tensor = torch.stack(batched_tensors, dim=0)  # [B, C, H, W]
+
         with torch.no_grad():
-            preds = self.model(batch_tensor)
+            preds = self.model(batch_tensor)  
+        
+        inference_time = time.time() - inference_start
+        print(f"Model inference took {inference_time:.2f}s")
 
+        # Timing postprocessing
+        postprocess_start = time.time()
         results = []
         for i in range(len(input_samples)):
-            pred_i = preds[i]
+            pred_i = preds[i]  # shape ~ [C, H, W]
             mask_i = masks[i]
             (old_h, old_w) = old_hw_dims[i]
             (norm_h, norm_w) = norm_hw_dims[i]
-            pred_i = pred_i.squeeze(0)
+
+            pred_i = pred_i.squeeze(0)  # -> [H, W]
             pred_i = pred_i[torch.where(mask_i == 1)].reshape(norm_h, norm_w)
+
             pred_i = resize_linear(pred_i.unsqueeze(0), new_size=(old_h, old_w)).squeeze(0)
+
             results.append(pred_i)
+        
+        postprocess_time = time.time() - postprocess_start
+        print(f"Postprocessing took {postprocess_time:.2f}s")
+        
+        print(f"Total predict time: {time.time() - total_predict_start:.2f}s")
 
         if single_input:
             return results[0]
         else:
-            return results 
-
-
+            return results
 
 if __name__ == "__main__":
     import numpy as np
