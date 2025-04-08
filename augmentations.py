@@ -255,15 +255,16 @@ class CompositeAntennaAugmentation(CompositeAugmentation):
     def __call__(self, sample: RadarSample, all_samples: List[RadarSample]) -> RadarSample:
         if self.multi_antenna:
             sample = self._apply_multi_antenna(sample, all_samples)
+        return sample
 
     def _apply_multi_antenna(self, sample: RadarSample, all_samples: List[RadarSample]) -> RadarSample:
-        random_inds = np.arange(all_samples)
+        random_inds = np.arange(len(all_samples))
         np.random.shuffle(random_inds)
         
         pair = None
         for ind in random_inds:
             pair = all_samples[ind]
-            if pair.ids[:3] == sample.ids[:3]:
+            if (pair.ids[:3] == sample.ids[:3]) and (pair.ids[3] != sample.ids[3]):
                 break
         if pair is None:
             raise ValueError(f"Sample with ids {sample.ids} has no pairs!")
@@ -272,7 +273,7 @@ class CompositeAntennaAugmentation(CompositeAugmentation):
         sample.y_ant = [sample.y_ant, pair.y_ant]
         sample.azimuth = [sample.azimuth, pair.azimuth]
         
-        return
+        return sample
 
 
 
@@ -285,9 +286,6 @@ class AugmentationPipeline:
 
         
     def __call__(self, sample: RadarSample, all_samples: List[RadarSample]) -> RadarSample:
-        if not self.training:
-            return sample
-            
         for aug, aug_p in zip(self.augmentations, self.p):
             apply_aug = random.random() < aug_p
             if not apply_aug:

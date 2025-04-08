@@ -10,7 +10,7 @@ from utils import split_data_task2
 from train_module import train_model
 from _types import RadarSampleInputs
 from data_module import PathlossDataset
-from augmentations import AugmentationPipeline, GeometricAugmentation
+from augmentations import AugmentationPipeline, GeometricAugmentation, CompositeAntennaAugmentation
 
 def main():
     parser = argparse.ArgumentParser(description='Train and evaluate pathloss prediction model')
@@ -93,13 +93,16 @@ def main():
     
     augmentations = AugmentationPipeline(
         [
-            GeometricAugmentation(
-                angle_range=(-30, 30),
-                scale_range=(1/1.5, 1.5),
-                flip_vertical=True,
-                flip_horizontal=True,
-                cardinal_rotation=True,
-            ),
+            # GeometricAugmentation(
+            #     angle_range=(-30, 30),
+            #     scale_range=(1/1.5, 1.5),
+            #     flip_vertical=True,
+            #     flip_horizontal=True,
+            #     cardinal_rotation=True,
+            # ),
+            CompositeAntennaAugmentation(
+                multi_antenna=True,
+            )
         ]
     )
     
