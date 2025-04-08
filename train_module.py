@@ -11,8 +11,9 @@ from inference import PathlossPredictor
 from loss import se, create_sip2net_loss
 
 
-def evaluate_model(model, val_samples, device, batch_size=8):
-    inference_model = PathlossPredictor(model=model)
+def evaluate_model(model, val_samples, device, batch_size=8, inference_model=None):
+    inference_model.model = model
+    inference_model.model.to(device)
 
     preds_list, targets_list = [], []
     val_samples = list(val_samples)
@@ -48,6 +49,10 @@ def train_model(model, train_loader, val_samples, optimizer, scheduler, num_epoc
     best_loss = float('inf')
     scaler = GradScaler(enabled=True)
     
+    # Create a single predictor instance that will be reused for validation
+    inference_model = PathlossPredictor(model=model)
+    
+    # Setup SIP2Net loss if requested
     if use_sip2net:
         if sip2net_params is None:
             sip2net_params = {}
@@ -94,7 +99,7 @@ def train_model(model, train_loader, val_samples, optimizer, scheduler, num_epoc
 
         t0 = time()
 
-        val_loss = evaluate_model(model, val_samples, device=device)
+        val_loss = evaluate_model(model, val_samples, device=device, inference_model=inference_model)
         print(f"Validation RMSE: {val_loss} taking {time() - t0}")
 
         current_lr = optimizer.param_groups[0]['lr']
