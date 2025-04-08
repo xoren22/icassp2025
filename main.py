@@ -92,15 +92,16 @@ def main():
     print(f"Train: {len(train_files)}, Validation: {len(val_files)}")
     
     augmentations = AugmentationPipeline(
-        p = [0.5],
+        p = [0.25, 0.25],
         augmentations= [
-            # GeometricAugmentation(
-            #     angle_range=(-30, 30),
-            #     scale_range=(1/1.5, 1.5),
-            #     flip_vertical=True,
-            #     flip_horizontal=True,
-            #     cardinal_rotation=True,
-            # ),
+            GeometricAugmentation(
+                angle_range=(-30, 30),
+                scale_range=(1/1.5, 1.5),
+                flip_vertical=True,
+                flip_horizontal=True,
+                cardinal_rotation=True,
+            ),
+            
             CompositeAntennaAugmentation(
                 multi_antenna=True
             ),

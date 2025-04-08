@@ -108,14 +108,8 @@ class GeometricAugmentation(BaseAugmentation):
         self.flip_vertical = flip_vertical
     
     def _apply_distance_scaling(self, sample: RadarSample, scale_factor: float) -> RadarSample:
-        distances = sample.input_img[2]
-
-        scaled_distances = distances * scale_factor
-        fspl_adjustment = 20.0 * np.log10(scale_factor)
-
-        sample.input_img[2] = scaled_distances
-        sample.output_img += fspl_adjustment
         sample.pixel_size *= scale_factor
+        sample.output_img += 20.0 * np.log10(scale_factor)
         
         return sample
     
@@ -182,14 +176,11 @@ class GeometricAugmentation(BaseAugmentation):
             
         return sample
     
-    def _apply_cardinal_rotation(self, sample: RadarSample) -> RadarSample:
+    def _apply_cardinal_rotation(self, sample: RadarSample, k: int) -> RadarSample:
         """
         Rotate by one of {90, 180, 270} degrees *losslessly* using torch.rot90.
         We also must update x_ant, y_ant, azimuth accordingly.
         """
-        # Randomly choose 90°, 180°, or 270° (k=1,2,3). If you want to allow 0°, add k=0.
-        k = random.choice([1, 2, 3])
-
         old_H, old_W = sample.H, sample.W
         sample.input_img = torch.rot90(sample.input_img, k, (1, 2))
         new_H, new_W = sample.input_img.shape[1], sample.input_img.shape[2]
@@ -216,13 +207,21 @@ class GeometricAugmentation(BaseAugmentation):
         sample.H, sample.W = new_H, new_W
         return sample
 
-    def __call__(self, sample: RadarSample) -> RadarSample:
+    def __call__(self, sample: RadarSample, seed: Optional[int] = None) -> RadarSample:
+        old_random_state = random.getstate()
+        old_numpy_state = np.random.get_state()
+
+        if seed is not None:
+            random.seed(seed)
+            np.random.seed(seed)
+
         if self.scale_range is not None:
             scale_factor = random.uniform(*self.scale_range)
             sample = self._apply_distance_scaling(sample, scale_factor)
 
         if self.cardinal_rotation:
-            sample = self._apply_cardinal_rotation(sample)
+            k = random.choice([1, 2, 3])
+            sample = self._apply_cardinal_rotation(sample=sample, k=k)
 
         if self.angle_range is not None:
             angle = random.uniform(*self.angle_range)
@@ -232,6 +231,9 @@ class GeometricAugmentation(BaseAugmentation):
         flip_v = self.flip_vertical and (random.random() < 0.5)
         if flip_h or flip_v:
             sample = self._apply_flipping(sample, flip_h, flip_v)
+
+        random.setstate(old_random_state)
+        np.random.set_state(old_numpy_state)
 
         return sample
 
@@ -279,15 +281,22 @@ class AugmentationPipeline:
 
         
     def __call__(self, sample: RadarSample, all_samples: List[RadarSample]) -> RadarSample:
-        for aug, aug_p in zip(self.augmentations, self.p):
-            apply_aug = random.random() < aug_p
-            if not apply_aug:
-                continue
-            if isinstance(aug, CompositeAugmentation):
-                sample = aug(sample, all_samples)
-            elif isinstance(aug, BaseAugmentation):
-                sample = aug(sample)
-        return sample
+        # for aug, aug_p in zip(self.augmentations, self.p):
+        #     apply_aug = random.random() < aug_p
+        #     if not apply_aug:
+        #         continue
+        #     if isinstance(aug, CompositeAugmentation):
+        #         sample = aug(sample, all_samples)
+        #     elif isinstance(aug, BaseAugmentation):
+        #         sample = aug(sample)
+
+        augmentation = random.choices(self.augmentations, weights=self.p, k=1)[0]
+        if isinstance(augmentation, CompositeAugmentation):
+            augmented_item = augmentation(sample, all_samples)
+        elif isinstance(augmentation, BaseAugmentation):
+            augmented_item = augmentation(sample)
+
+        return augmented_item
 
 
 
