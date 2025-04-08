@@ -160,7 +160,7 @@ def split_data_task1(inputs_list: List[RadarSampleInputs], val_ratio=0.25, split
 
 
 def split_data_task2(inputs_list: List[RadarSampleInputs], val_freqs, split_save_path=None):
-    inputs_list = np.random.choice(inputs_list, 100) # TODO remove after debug
+    # inputs_list = np.random.choice(inputs_list, 100) # TODO remove after debug
     train_inputs, val_inputs = split_data_task1(inputs_list)
     val_freqs = val_freqs if isinstance(val_freqs, list) else [val_freqs]
     val_inputs = [f for f in val_inputs if f.ids[2] in val_freqs]
@@ -174,4 +174,24 @@ def split_data_task2(inputs_list: List[RadarSampleInputs], val_freqs, split_save
                 "val_freqs": val_freqs}, fp
             )
     return train_inputs, val_inputs
+
+def calculate_distance(x_ant, y_ant, H, W, pixel_size):
+    y_grid, x_grid = torch.meshgrid(
+        torch.arange(H, dtype=torch.float32, device=torch.device('cpu')),
+        torch.arange(W, dtype=torch.float32, device=torch.device('cpu')),
+        indexing='ij'
+    )
+    return torch.sqrt((x_grid - x_ant)**2 + (y_grid - y_ant)**2) * pixel_size
+
+
+def combine_incoherent_sum_db(maps_db):
+    if not maps_db:
+        raise ValueError("No pathloss maps provided.")
+    power_fractions = [10.0 ** (-pl_db / 10.0) for pl_db in maps_db]
+    total_fraction = torch.zeros_like(power_fractions[0])
+    for frac in power_fractions:
+        total_fraction += frac
+    combined_pathloss_db = -10.0 * torch.log10(total_fraction)
+    
+    return combined_pathloss_db
 

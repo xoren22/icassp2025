@@ -6,7 +6,7 @@ import torchvision.transforms.functional as TF
 from torchvision.transforms.functional import InterpolationMode
 
 from _types import RadarSample
-from utils import matrix_to_image
+from utils import calculate_distance, combine_incoherent_sum_db
 
 
 def resize_nearest(img, new_size):
@@ -16,11 +16,11 @@ def resize_linear(img, new_size):
     return TF.resize(img, new_size, interpolation=InterpolationMode.BILINEAR)
 
 def resize_db(img, new_size):
-    lin_energy = 10.0 ** (img / 10.0)
+    lin_energy = 10.0 ** (-img / 10.0)
     lin_rs = TF.resize(lin_energy, new_size, interpolation=InterpolationMode.BILINEAR)
     img_rs = torch.zeros_like(lin_rs)
     valid_mask = lin_rs > 0
-    img_rs[valid_mask] = 10.0 * torch.log10(lin_rs[valid_mask])
+    img_rs[valid_mask] = -10.0 * torch.log10(lin_rs[valid_mask])
     
     return img_rs
 
@@ -32,22 +32,12 @@ def rotate_linear(img, angle):
     return TF.rotate(img, angle, interpolation=InterpolationMode.BILINEAR, fill=0, expand=True)
 
 def rotate_db(img, angle):
-    lin_energy = 10.0 ** (img / 10.0)
+    lin_energy = 10.0 ** (-img / 10.0)
     lin_rs = TF.rotate(lin_energy, angle, interpolation=InterpolationMode.BILINEAR, fill=0, expand=True)
     img_rs = torch.zeros_like(lin_rs)
     valid_mask = lin_rs > 0
-    img_rs[valid_mask] = 10.0 * torch.log10(lin_rs[valid_mask])
+    img_rs[valid_mask] = -10.0 * torch.log10(lin_rs[valid_mask])
     return img_rs
-
-
-def calculate_distance(x_ant, y_ant, H, W, pixel_size):
-    y_grid, x_grid = torch.meshgrid(
-        torch.arange(H, dtype=torch.float32, device=torch.device('cpu')),
-        torch.arange(W, dtype=torch.float32, device=torch.device('cpu')),
-        indexing='ij'
-    )
-    return torch.sqrt((x_grid - x_ant)**2 + (y_grid - y_ant)**2) * pixel_size
-
 
 
 def normalize_size(sample: RadarSample, target_size) -> RadarSample:
@@ -87,8 +77,6 @@ def normalize_size(sample: RadarSample, target_size) -> RadarSample:
     sample.mask = torch.zeros((target_size, target_size), dtype=torch.float32, device=torch.device('cpu'))
     sample.mask[:new_h, :new_w] = mask_resized
     
-    sample.input_img[2, :, :] = calculate_distance(sample.x_ant, sample.y_ant, sample.H, sample.W, sample.pixel_size)
-
     return sample
 
 
@@ -258,6 +246,8 @@ class CompositeAntennaAugmentation(CompositeAugmentation):
         return sample
 
     def _apply_multi_antenna(self, sample: RadarSample, all_samples: List[RadarSample]) -> RadarSample:
+        sample = sample.copy()
+        
         random_inds = np.arange(len(all_samples))
         np.random.shuffle(random_inds)
         
@@ -272,7 +262,10 @@ class CompositeAntennaAugmentation(CompositeAugmentation):
         sample.x_ant = [sample.x_ant, pair.x_ant]
         sample.y_ant = [sample.y_ant, pair.y_ant]
         sample.azimuth = [sample.azimuth, pair.azimuth]
-        
+        sample.freq_MHz = [sample.freq_MHz, pair.freq_MHz]
+        sample.radiation_pattern = [sample.radiation_pattern, pair.radiation_pattern]
+        sample.output_img = combine_incoherent_sum_db([sample.output_img, pair.output_img])
+
         return sample
 
 
@@ -295,5 +288,6 @@ class AugmentationPipeline:
             elif isinstance(aug, BaseAugmentation):
                 sample = aug(sample)
         return sample
+
 
 

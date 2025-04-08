@@ -18,6 +18,22 @@ class RadarSample:
     pixel_size: float = 0.25
     mask: Union[torch.Tensor, None] = None
     ids: Optional[Tuple[int, int, int, int]] = None
+    
+    def copy(self):
+        return RadarSample(
+                    self.H,
+                    self.W,
+                    self.x_ant,
+                    self.y_ant,
+                    self.azimuth,
+                    self.freq_MHz,
+                    self.input_img,  
+                    self.output_img, 
+                    self.radiation_pattern,
+                    self.pixel_size,
+                    self.mask,
+                    self.ids,
+                )
 
 
 @dataclass

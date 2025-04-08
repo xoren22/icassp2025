@@ -15,7 +15,7 @@ from augmentations import AugmentationPipeline, GeometricAugmentation, Composite
 def main():
     parser = argparse.ArgumentParser(description='Train and evaluate pathloss prediction model')
 
-    parser.add_argument('--num_workers', type=int, default=0, help='number of workers')
+    parser.add_argument('--num_workers', type=int, default=5, help='number of workers')
     
     parser.add_argument('--gpu', type=int, default=None, help='GPU ID to use (default: auto-seleqct)')
     parser.add_argument('--batch_size', type=int, default=8, help='Batch size for training')
@@ -88,11 +88,12 @@ def main():
     print(f"\nLogging results at {logger.log_dir}\n\n")
 
     split_save_path=os.path.join(logger.log_dir, "train_val_split.pkl")
-    train_files, val_files = split_data_task2(inputs_list, val_freqs=None, split_save_path=split_save_path)
+    train_files, val_files = split_data_task2(inputs_list, val_freqs=3, split_save_path=split_save_path)
     print(f"Train: {len(train_files)}, Validation: {len(val_files)}")
     
     augmentations = AugmentationPipeline(
-        [
+        p = [0.5],
+        augmentations= [
             # GeometricAugmentation(
             #     angle_range=(-30, 30),
             #     scale_range=(1/1.5, 1.5),
@@ -101,8 +102,8 @@ def main():
             #     cardinal_rotation=True,
             # ),
             CompositeAntennaAugmentation(
-                multi_antenna=True,
-            )
+                multi_antenna=True
+            ),
         ]
     )
     

@@ -42,8 +42,8 @@ def evaluate_model(model, val_samples, device, batch_size=8):
 
     return val_rmse
 
-def evaluate_model(model, val_samples, device, batch_size=8):
-    return 1 / time()
+# def evaluate_model(model, val_samples, device, batch_size=8):
+#     return 1 / time()
 
 def train_model(model, train_loader, val_samples, optimizer, scheduler, num_epochs, save_dir, logger, device=None, use_sip2net=False, sip2net_params=None):
     os.makedirs(save_dir, exist_ok=True)

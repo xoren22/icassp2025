@@ -3,6 +3,7 @@ import numpy as np
 from numba import njit
 
 from _types import RadarSample
+from utils import calculate_distance, combine_incoherent_sum_db
 
 
 @njit
@@ -123,7 +124,7 @@ def normalize_input(input_tensor):
     normalized = input_tensor.clone()
     for i in range(2):
         normalized[i] = (normalized[i] / 255.0 - mean[i]) / std[i]
-    normalized[2] = torch.log10(1 + normalized[2])
+    normalized[2] = normalized[2]  / 100.0 # fspl channel
     normalized[3] = normalized[3] / min_antenna_gain
     normalized[4] = torch.log10(normalized[4]) - 1.9  # "magic shift"
     normalized[5] = normalized[5] / 100.0 # this feature mask has values < 300
@@ -132,49 +133,86 @@ def normalize_input(input_tensor):
 
 
 def featurizer(sample: RadarSample) -> torch.Tensor:
-    reflectance = sample.input_img[0]  # First channel
-    transmittance = sample.input_img[1]  # Second channel
-    distance = sample.input_img[2]  # Third channel
+    reflectance    = sample.input_img[0]  # channel 0
+    transmittance  = sample.input_img[1]  # channel 1
 
-    radiation_pattern = sample.radiation_pattern
-    
-    antenna_gain = calculate_antenna_gain(
-        radiation_pattern, 
-        sample.W, 
-        sample.H, 
-        sample.azimuth, 
-        sample.x_ant, 
-        sample.y_ant
-    )
-    
-    # Calculate free space path loss on CPU
-    free_space_pathloss = calculate_fspl(
-        dist_m=distance,
-        freq_MHz=sample.freq_MHz,
-        antenna_gain=antenna_gain, 
-    )
+    # Mask (padded region) to place at final channel
+    mask           = sample.mask
 
-    # Calculate transmittance loss on CPU
-    transmittance_loss = calculate_transmittance_loss(
-        transmittance, 
-        sample.x_ant, 
-        sample.y_ant
-    )
-    
-    fs_plus_transmittance_loss = free_space_pathloss + transmittance_loss
+    # Handle x_ant, y_ant, freq_MHz, azimuth, etc. as lists for multi-antenna
+    if isinstance(sample.x_ant, (int, float)):
+        x_ants = [sample.x_ant]
+        y_ants = [sample.y_ant]
+        freqs  = [sample.freq_MHz]
+        azims  = [sample.azimuth]
+        rads   = [sample.radiation_pattern]
+    else:
+        x_ants = sample.x_ant
+        y_ants = sample.y_ant
+        freqs  = sample.freq_MHz
+        azims  = sample.azimuth
+        rads   = sample.radiation_pattern
 
-    # Build input tensor: [7, H, W] - Already in correct (C, H, W) format
+    # Collect per-antenna dB maps
+    fspl_maps   = []
+    transm_maps = []
+    gain_maps   = []
+
+    # Loop over antennas
+    for i in range(len(x_ants)):
+        # 1) Compute distance from this antenna
+        dist_i = calculate_distance(
+            x_ant=x_ants[i],
+            y_ant=y_ants[i],
+            H=sample.H,
+            W=sample.W,
+            pixel_size=sample.pixel_size
+        )
+        
+        # 2) Calculate antenna gain map
+        gain_i = calculate_antenna_gain(
+            radiation_pattern=rads[i],
+            W=sample.W,
+            H=sample.H,
+            azimuth=azims[i],
+            x_ant=x_ants[i],
+            y_ant=y_ants[i],
+        )
+
+        # 3) Calculate FSPL (which subtracts antenna gain internally)
+        #    pass the distance & freq for this antenna
+        fspl_db_i = calculate_fspl(
+            dist_m=dist_i,
+            freq_MHz=freqs[i],
+            antenna_gain=gain_i,   # shape=(H,W) after broadcast in the function
+        )
+        fspl_maps.append(fspl_db_i)
+
+        # 4) Calculate transmittance loss
+        transm_loss_i = calculate_transmittance_loss(
+            transmittance_matrix=transmittance,
+            x_ant=x_ants[i],
+            y_ant=y_ants[i],
+        )
+        transm_maps.append(transm_loss_i)
+        gain_maps.append(gain_i)
+
+    combined_fspl_db   = combine_incoherent_sum_db(fspl_maps)
+    combined_transm_db = combine_incoherent_sum_db(transm_maps)
+    combined_gain_db   = combine_incoherent_sum_db(gain_maps)
+    fs_plus_transmittance_loss = combined_fspl_db + combined_transm_db
     input_tensor = torch.zeros((7, sample.H, sample.W), dtype=torch.float32, device=torch.device('cpu'))
-    input_tensor[0] = reflectance  # reflectance
-    input_tensor[1] = transmittance  # transmittance
-    input_tensor[2] = distance  # distance
-    input_tensor[3] = antenna_gain
-    input_tensor[4] = torch.full((sample.H, sample.W), sample.freq_MHz, dtype=torch.float32, device=torch.device('cpu'))
+
+    input_tensor[0] = reflectance         # reflectance
+    input_tensor[1] = transmittance       # transmittance
+    input_tensor[2] = combined_fspl_db    # replaced old "distance" with combined FSPL
+    input_tensor[3] = combined_gain_db    # combined antenna gain
+    input_tensor[4] = torch.full((sample.H, sample.W), np.mean(freqs), dtype=torch.float32)
     input_tensor[5] = fs_plus_transmittance_loss
+    input_tensor[6] = mask
 
     input_tensor = normalize_input(input_tensor)
 
-    mask = sample.mask
-    input_tensor[6] = mask
-    
     return input_tensor
+
+
