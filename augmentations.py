@@ -6,7 +6,7 @@ import torchvision.transforms.functional as TF
 from torchvision.transforms.functional import InterpolationMode
 
 from _types import RadarSample
-from utils import calculate_distance, combine_incoherent_sum_db
+from utils import combine_incoherent_sum_db
 
 
 def resize_nearest(img, new_size):
@@ -41,26 +41,25 @@ def rotate_db(img, angle):
 
 
 def normalize_size(sample: RadarSample, target_size) -> RadarSample:
-    if sample.x_ant < 0 or sample.x_ant >= sample.W or sample.y_ant < 0 or sample.y_ant >= sample.H:
-        # print(f"Warning: antenna coords out of range. (x_ant={sample.x_ant}, y_ant={sample.y_ant}), (W={sample.W}, H={sample.H}) -> clamping to valid range.")
-        sample.x_ant = max(0, min(sample.x_ant, sample.W - 1))
-        sample.y_ant = max(0, min(sample.y_ant, sample.H - 1))
+    sample.x_ant = np.clip(sample.x_ant, 0, sample.W - 1)
+    sample.y_ant = np.clip(sample.y_ant, 0, sample.H - 1)
+    
     C, H, W = sample.input_img.shape
     scale_factor = min(target_size / H, target_size / W)
     new_h, new_w = int(H * scale_factor), int(W * scale_factor)
     new_size = (new_h, new_w)
     
-    reflectance = sample.input_img[0:1]  # First channel with dimension [1, H, W]
-    transmittance = sample.input_img[1:2]  # Second channel with dimension [1, H, W]
+    reflectance = sample.input_img[0:1] 
+    transmittance = sample.input_img[1:2] 
     
     reflectance_resized = resize_nearest(reflectance, new_size)
     transmittance_resized = resize_nearest(transmittance, new_size)
     mask_resized = resize_nearest(sample.mask.unsqueeze(0), new_size).squeeze(0)
     
-    sample.x_ant = int(sample.x_ant * scale_factor)
-    sample.y_ant = int(sample.y_ant * scale_factor)
+    sample.x_ant = (sample.x_ant * scale_factor).astype(int)
+    sample.y_ant = (sample.y_ant * scale_factor).astype(int)
     
-    sample.pixel_size /= scale_factor  # Update pixel size (divide by scale factor)
+    sample.pixel_size /= scale_factor 
     
     sample.input_img = torch.zeros((C, target_size, target_size), dtype=torch.float32, device=torch.device('cpu'))
     sample.input_img[0:1, :new_h, :new_w] = reflectance_resized
@@ -78,8 +77,6 @@ def normalize_size(sample: RadarSample, target_size) -> RadarSample:
     sample.mask[:new_h, :new_w] = mask_resized
     
     return sample
-
-
 
 class BaseAugmentation:
     """Base class for all augmentations"""
@@ -115,15 +112,17 @@ class GeometricAugmentation(BaseAugmentation):
     
     def _apply_rotation(self, sample: RadarSample, angle: float) -> RadarSample:
         old_H, old_W = sample.H, sample.W
-        antenna_img = torch.zeros((old_H, old_W), dtype=torch.float32)
-        antenna_img[int(round(sample.y_ant)), int(round(sample.x_ant))] = 100.0
-        antenna_rot = rotate_linear(antenna_img.unsqueeze(0), angle).squeeze(0)
-        coords = (antenna_rot > 0).nonzero(as_tuple=False)
-
-        new_ay, new_ax = coords[antenna_rot[coords[:,0], coords[:,1]] == antenna_rot.max()][0].tolist()
+        new_ays, new_axs = [], []
+        for x_ant, y_ant in zip(sample.x_ant, sample.y_ant):
+            antenna_img = torch.zeros((old_H, old_W), dtype=torch.float32)
+            antenna_img[int(round(y_ant)), int(round(x_ant))] = 100.0
+            antenna_rot = rotate_linear(antenna_img.unsqueeze(0), angle).squeeze(0)
+            coords = (antenna_rot > 0).nonzero(as_tuple=False)
+            new_ay, new_ax = coords[antenna_rot[coords[:,0], coords[:,1]] == antenna_rot.max()][0].tolist()
+            new_ays.append(float(new_ay)), new_axs.append(float(new_ax))
         
-        sample.x_ant, sample.y_ant = float(new_ax), float(new_ay)
-        sample.azimuth = (sample.azimuth + angle) % 360
+        sample.x_ant, sample.y_ant = new_axs, new_ays
+        sample.azimuth = [(az + angle) % 360 for az in sample.azimuth]
 
         reflectance = sample.input_img[0:1]  # (1, H, W)
         transmittance = sample.input_img[1:2]  # (1, H, W)
@@ -142,9 +141,8 @@ class GeometricAugmentation(BaseAugmentation):
         rot_transmittance = rotate_nearest(transmittance, angle)
 
         _, sample.H, sample.W = rot_reflectance.shape
-        rot_distance = calculate_distance(sample.x_ant, sample.y_ant, sample.H, sample.W, sample.pixel_size)
 
-        sample.input_img = torch.cat([rot_reflectance, rot_transmittance, rot_distance.unsqueeze(0)], dim=0)
+        sample.input_img = torch.cat([rot_reflectance, rot_transmittance], dim=0)
         sample = normalize_size(sample=sample, target_size=old_H)
         
         return sample
@@ -261,11 +259,12 @@ class CompositeAntennaAugmentation(CompositeAugmentation):
         if pair is None:
             raise ValueError(f"Sample with ids {sample.ids} has no pairs!")
         
-        sample.x_ant = [sample.x_ant, pair.x_ant]
-        sample.y_ant = [sample.y_ant, pair.y_ant]
-        sample.azimuth = [sample.azimuth, pair.azimuth]
-        sample.freq_MHz = [sample.freq_MHz, pair.freq_MHz]
-        sample.radiation_pattern = [sample.radiation_pattern, pair.radiation_pattern]
+        sample.x_ant += pair.x_ant
+        sample.y_ant += pair.y_ant
+        sample.azimuth += pair.azimuth
+        sample.freq_MHz += pair.freq_MHz
+        sample.radiation_pattern += pair.radiation_pattern
+        
         sample.output_img = combine_incoherent_sum_db([sample.output_img, pair.output_img])
 
         return sample
@@ -274,33 +273,25 @@ class CompositeAntennaAugmentation(CompositeAugmentation):
 
 
 class AugmentationPipeline:
-    def __init__(self, augmentations: List[BaseAugmentation], p=None, training: bool = True):
+    def __init__(self, augmentations: List[BaseAugmentation], p, training: bool = True):
         self.training = training
         self.augmentations = augmentations
         self.p = p #or [1.0 for _ in augmentations]
 
         
     def __call__(self, sample: RadarSample, all_samples: List[RadarSample]) -> RadarSample:
-        # for aug, aug_p in zip(self.augmentations, self.p):
-        #     apply_aug = random.random() < aug_p
-        #     if not apply_aug:
-        #         continue
-        #     if isinstance(aug, CompositeAugmentation):
-        #         sample = aug(sample, all_samples)
-        #     elif isinstance(aug, BaseAugmentation):
-        #         sample = aug(sample)
-
-        total_p = sum(self.p)
-        if total_p < random.random():
-            return sample
+        composites = [(aug, p) for aug, p in zip(self.augmentations, self.p) if isinstance(aug, CompositeAugmentation)]
+        others = [(aug, p) for aug, p in zip(self.augmentations, self.p) if isinstance(aug, BaseAugmentation) and not isinstance(aug, CompositeAugmentation)]
         
-        augmentation = random.choices(self.augmentations, weights=self.p, k=1)[0]
-        if isinstance(augmentation, CompositeAugmentation):
-            augmented_item = augmentation(sample, all_samples)
-        elif isinstance(augmentation, BaseAugmentation):
-            augmented_item = augmentation(sample)
+        for aug, aug_p in composites:
+            if random.random() < aug_p:
+                sample = aug(sample, all_samples)
 
-        return augmented_item
+        for aug, aug_p in others:
+            if random.random() < aug_p:
+                sample = aug(sample)
+        
+        return sample
 
 
 

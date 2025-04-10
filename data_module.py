@@ -6,12 +6,12 @@ from typing import Union
 from torch.utils.data import Dataset
 from torchvision.io import read_image
 
-from featurizer import featurizer
+from featurizer import featurize_inputs
 from augmentations import normalize_size
 from _types import RadarSample, RadarSampleInputs
 
 INITIAL_PIXEL_SIZE = 0.25
-IMG_TARGET_SIZE = 640
+IMG_TARGET_SIZE = 128
 
 def read_sample(inputs: Union[RadarSampleInputs, dict]):
     if isinstance(inputs, RadarSampleInputs):
@@ -25,7 +25,7 @@ def read_sample(inputs: Union[RadarSampleInputs, dict]):
     sampling_position = inputs["sampling_position"]
     radiation_pattern_file = inputs["radiation_pattern_file"]
     
-    input_img = read_image(input_file).float()
+    input_img = read_image(input_file).float()[:2] # distance channel is redundant, can be calculated from pixel_size, x_ant and y_ant
     C, H, W = input_img.shape
     
     output_img = None
@@ -41,18 +41,18 @@ def read_sample(inputs: Union[RadarSampleInputs, dict]):
     radiation_pattern = torch.from_numpy(radiation_pattern_np).float()
 
     sample = RadarSample(
-        ids=ids,
+        ids=[ids],
         H=H,
         W=W,
-        x_ant=x_ant,
-        y_ant=y_ant,
-        azimuth=azimuth,
-        freq_MHz=freq_MHz,
         input_img=input_img,
         output_img=output_img,
         pixel_size=INITIAL_PIXEL_SIZE,
         mask=torch.ones((H, W)),
-        radiation_pattern=radiation_pattern,
+        x_ant=[x_ant],
+        y_ant=[y_ant],
+        azimuth=[azimuth],
+        freq_MHz=[freq_MHz],
+        radiation_pattern=[radiation_pattern],
     )
     
     return sample
@@ -71,7 +71,6 @@ class PathlossDataset(Dataset):
         self.augmentations = augmentations
 
         self.target_size = IMG_TARGET_SIZE
-        self.featurizer = featurizer
         self.samples = self._preprocess_samples(self.inputs_list)
     
     def _preprocess_samples(self, inputs_list):
@@ -92,7 +91,7 @@ class PathlossDataset(Dataset):
             sample = self.augmentations(sample, self.samples)
 
         output_tensor = sample.output_img if sample.output_img is not None else None
-        input_tensor = self.featurizer(sample=sample)
+        input_tensor = featurize_inputs(sample=sample)
         mask = sample.mask
 
         return input_tensor, output_tensor, mask   

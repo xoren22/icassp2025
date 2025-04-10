@@ -2,7 +2,7 @@ import torch
 from typing import List, Union, Dict
 
 from utils import load_model
-from featurizer import featurizer
+from featurizer import featurize_inputs
 from _types import RadarSampleInputs
 from augmentations import normalize_size, resize_linear
 from data_module import read_sample, IMG_TARGET_SIZE, INITIAL_PIXEL_SIZE
@@ -55,7 +55,7 @@ class PathlossPredictor:
                 scaling_factor = INITIAL_PIXEL_SIZE / sample.pixel_size
                 norm_h, norm_w = int(old_h * scaling_factor), int(old_w * scaling_factor)
 
-                input_tensor = featurizer(sample).to(device)
+                input_tensor = featurize_inputs(sample).to(device)
 
                 if use_cache:
                     self.sample_cache[cache_key] = {

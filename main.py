@@ -15,7 +15,7 @@ from augmentations import AugmentationPipeline, GeometricAugmentation, Composite
 def main():
     parser = argparse.ArgumentParser(description='Train and evaluate pathloss prediction model')
 
-    parser.add_argument('--num_workers', type=int, default=6, help='number of workers')
+    parser.add_argument('--num_workers', type=int, default=0, help='number of workers')
     
     parser.add_argument('--gpu', type=int, default=None, help='GPU ID to use (default: auto-seleqct)')
     parser.add_argument('--batch_size', type=int, default=8, help='Batch size for training')
@@ -92,19 +92,19 @@ def main():
     print(f"Train: {len(train_files)}, Validation: {len(val_files)}")
     
     augmentations = AugmentationPipeline(
-        p = [0.25, 0.25],
-        augmentations= [
-            GeometricAugmentation(
-                angle_range=(-30, 30),
-                scale_range=(1/1.5, 1.5),
-                flip_vertical=True,
-                flip_horizontal=True,
-                cardinal_rotation=True,
-            ),
+        p = [0, 0],
+        augmentations = [
+            # GeometricAugmentation(
+            #     angle_range=(-30, 30),
+            #     scale_range=(1/1.5, 1.5),
+            #     flip_vertical=True,
+            #     flip_horizontal=True,
+            #     cardinal_rotation=True,
+            # ),
 
-            CompositeAntennaAugmentation(
-                multi_antenna=True
-            ),
+            # CompositeAntennaAugmentation(
+            #     multi_antenna=True
+            # ),
         ]
     )
     

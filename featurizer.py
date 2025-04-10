@@ -132,26 +132,16 @@ def normalize_input(input_tensor):
     return normalized
 
 
-def featurizer(sample: RadarSample) -> torch.Tensor:
+def featurize_inputs(sample: RadarSample) -> torch.Tensor:
     reflectance    = sample.input_img[0]  # channel 0
     transmittance  = sample.input_img[1]  # channel 1
-
-    # Mask (padded region) to place at final channel
     mask           = sample.mask
 
-    # Handle x_ant, y_ant, freq_MHz, azimuth, etc. as lists for multi-antenna
-    if isinstance(sample.x_ant, (int, float)):
-        x_ants = [sample.x_ant]
-        y_ants = [sample.y_ant]
-        freqs  = [sample.freq_MHz]
-        azims  = [sample.azimuth]
-        rads   = [sample.radiation_pattern]
-    else:
-        x_ants = sample.x_ant
-        y_ants = sample.y_ant
-        freqs  = sample.freq_MHz
-        azims  = sample.azimuth
-        rads   = sample.radiation_pattern
+    x_ants = sample.x_ant
+    y_ants = sample.y_ant
+    freqs  = sample.freq_MHz
+    azims  = sample.azimuth
+    rads   = sample.radiation_pattern
 
     # Collect per-antenna dB maps
     fspl_maps   = []

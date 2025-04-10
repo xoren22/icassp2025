@@ -1,23 +1,23 @@
 import os
 import torch
-from typing import Union, Tuple, Optional
 from dataclasses import dataclass, asdict
+from typing import Union, Tuple, Optional, List
 
 
 @dataclass
 class RadarSample:
     H: int
     W: int
-    x_ant: float
-    y_ant: float
-    azimuth: float
-    freq_MHz: float
+    x_ant: List[float]
+    y_ant: List[float]
+    azimuth: List[float]
+    freq_MHz: List[float]
     input_img: torch.Tensor  # In format (C, H, W)
     output_img: torch.Tensor  # In format (H, W) or (1, H, W)
-    radiation_pattern: torch.Tensor
+    radiation_pattern: List[torch.Tensor]
     pixel_size: float = 0.25
     mask: Union[torch.Tensor, None] = None
-    ids: Optional[Tuple[int, int, int, int]] = None
+    ids: Optional[List[Tuple[int, int, int, int]]] = None
     
     def copy(self):
         return RadarSample(
