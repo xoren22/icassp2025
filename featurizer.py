@@ -7,7 +7,7 @@ from utils import calculate_distance, combine_incoherent_sum_db
 
 
 @njit
-def _calculate_transmittance_loss_numpy(transmittance_matrix, x_ant, y_ant, n_angles=360*128/1, radial_step=1.0, max_walls=10):
+def _calculate_transmittance_loss_numpy(transmittance_matrix, x_ant, y_ant, n_angles=360*128, radial_step=1.0, max_walls=10):
     """
     Numpy implementation for numba optimization.
     This function must stay as numpy for numba to work.
@@ -20,7 +20,7 @@ def _calculate_transmittance_loss_numpy(transmittance_matrix, x_ant, y_ant, n_an
     sin_vals = np.sin(np.arange(n_angles) * dtheta)
     max_dist = np.sqrt(w*w + h*h)
     
-    for i in range(n_angles):
+    for i in range(int(n_angles)):
         cos_t = cos_vals[i]
         sin_t = sin_vals[i]
         
@@ -84,7 +84,7 @@ def calculate_transmittance_loss(transmittance_matrix, x_ant, y_ant, n_angles=36
     return torch.from_numpy(output_np).to(device=torch.device('cpu'))
 
 
-_calculate_transmittance_loss_numpy(np.array([[1]]), 0, 0)
+# _calculate_transmittance_loss_numpy(np.array([[1]]), 0, 0)
 
 
 def calculate_fspl(

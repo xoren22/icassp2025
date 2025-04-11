@@ -122,7 +122,7 @@ class GeometricAugmentation(BaseAugmentation):
             new_ays.append(float(new_ay)), new_axs.append(float(new_ax))
         
         sample.x_ant, sample.y_ant = new_axs, new_ays
-        sample.azimuth = [(az + angle) % 360 for az in sample.azimuth]
+        sample.azimuth = (sample.azimuth + angle) % 360
 
         reflectance = sample.input_img[0:1]  # (1, H, W)
         transmittance = sample.input_img[1:2]  # (1, H, W)
@@ -254,7 +254,7 @@ class CompositeAntennaAugmentation(CompositeAugmentation):
         pair = None
         for ind in random_inds:
             pair = all_samples[ind]
-            if (pair.ids[:3] == sample.ids[:3]) and (pair.ids[3] != sample.ids[3]):
+            if (pair.ids[:3] == sample.ids[:3]).all() and (pair.ids[3] != sample.ids[3]):
                 break
         if pair is None:
             raise ValueError(f"Sample with ids {sample.ids} has no pairs!")

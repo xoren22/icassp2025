@@ -2,8 +2,8 @@ import torch
 from typing import List, Union, Dict
 
 from utils import load_model
-from featurizer import featurize_inputs
 from _types import RadarSampleInputs
+from featurizer import featurize_inputs
 from augmentations import normalize_size, resize_linear
 from data_module import read_sample, IMG_TARGET_SIZE, INITIAL_PIXEL_SIZE
 

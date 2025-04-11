@@ -11,7 +11,7 @@ from augmentations import normalize_size
 from _types import RadarSample, RadarSampleInputs
 
 INITIAL_PIXEL_SIZE = 0.25
-IMG_TARGET_SIZE = 128
+IMG_TARGET_SIZE = 640
 
 def read_sample(inputs: Union[RadarSampleInputs, dict]):
     if isinstance(inputs, RadarSampleInputs):
@@ -41,17 +41,17 @@ def read_sample(inputs: Union[RadarSampleInputs, dict]):
     radiation_pattern = torch.from_numpy(radiation_pattern_np).float()
 
     sample = RadarSample(
-        ids=[ids],
+        ids=np.array(ids),
         H=H,
         W=W,
         input_img=input_img,
         output_img=output_img,
         pixel_size=INITIAL_PIXEL_SIZE,
         mask=torch.ones((H, W)),
-        x_ant=[x_ant],
-        y_ant=[y_ant],
-        azimuth=[azimuth],
-        freq_MHz=[freq_MHz],
+        x_ant=np.array([x_ant]),
+        y_ant=np.array([y_ant]),
+        azimuth=np.array([azimuth]),
+        freq_MHz=np.array([freq_MHz]),
         radiation_pattern=[radiation_pattern],
     )
     
