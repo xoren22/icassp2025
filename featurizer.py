@@ -1,6 +1,7 @@
 import torch
 import numpy as np
 from numba import njit
+from scipy.ndimage import gaussian_filter
 
 from _types import RadarSample
 from utils import calculate_distance, combine_incoherent_sum_db
@@ -78,9 +79,11 @@ def _calculate_transmittance_loss_numpy(transmittance_matrix, x_ant, y_ant, n_an
     return output
 
 
-def calculate_transmittance_loss(transmittance_matrix, x_ant, y_ant, n_angles=360*128/1, radial_step=1.0, max_walls=10):
+def calculate_transmittance_loss(transmittance_matrix, x_ant, y_ant, n_angles=360*128*100, radial_step=1.0, max_walls=10, smooth=True):
     transmittance_np = transmittance_matrix.cpu().numpy()
     output_np = _calculate_transmittance_loss_numpy(transmittance_np, x_ant, y_ant, n_angles, radial_step, max_walls)
+    if smooth:
+        output = gaussian_filter(output_np, sigma=2.0, mode='reflect')
     return torch.from_numpy(output_np).to(device=torch.device('cpu'))
 
 
