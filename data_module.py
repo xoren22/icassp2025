@@ -87,6 +87,9 @@ class PathlossDataset(Dataset):
 
     def __getitem__(self, idx):
         sample = self.samples[idx]
+        nonzero_count, total = torch.count_nonzero(sample.input_img[0]), torch.prod(torch.tensor(sample.input_img[0].size()))
+        wall_density_alpha = (nonzero_count / total)**2 * 383.37
+
         if self.augmentations is not None:
             sample = self.augmentations(sample, self.samples)
 
@@ -94,4 +97,4 @@ class PathlossDataset(Dataset):
         input_tensor = featurize_inputs(sample=sample)
         mask = sample.mask
 
-        return input_tensor, output_tensor, mask   
+        return input_tensor, output_tensor, mask, wall_density_alpha 

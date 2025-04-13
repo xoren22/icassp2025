@@ -42,6 +42,9 @@ def evaluate_model(model, val_samples, device, batch_size=8, inference_model=Non
 
     return val_rmse
 
+def evaluate_model(model, val_samples, device, batch_size=8, inference_model=None):
+    return 1/time()
+
 
 def train_model(model, train_loader, val_samples, optimizer, scheduler, num_epochs, save_dir, logger, device=None, use_sip2net=False, sip2net_params=None):
     os.makedirs(save_dir, exist_ok=True)
@@ -59,9 +62,9 @@ def train_model(model, train_loader, val_samples, optimizer, scheduler, num_epoc
         sip2net_criterion = create_sip2net_loss(
             use_mse=True,
             mse_weight=sip2net_params.get('mse_weight', 1.0),
-            alpha1=sip2net_params.get('alpha1', 500.0),
-            alpha2=sip2net_params.get('alpha2', 1.0),
-            alpha3=sip2net_params.get('alpha3', 0.0)
+            ssim_alpha=sip2net_params.get('ssim_alpha', 500.0),
+            gdl_alpha=sip2net_params.get('gdl_alpha', 1.0),
+            f1_alpha=sip2net_params.get('f1_alpha', 0.0)
         )
         print(f"Using SIP2Net loss")
 
@@ -69,17 +72,18 @@ def train_model(model, train_loader, val_samples, optimizer, scheduler, num_epoc
         print(f'Epoch {epoch+1}/{num_epochs}\n{"-"*10}')
         model.train()
 
-        for batch_idx, (inputs, targets, masks) in enumerate(tqdm(train_loader), start=1):
+        for batch_idx, (inputs, targets, masks, wall_density_alphas) in enumerate(tqdm(train_loader), start=1):
             inputs = inputs.to(device)
             targets = targets.to(device)
             masks = masks.to(device)
+            wall_density_alphas = wall_density_alphas.to(device)
 
             optimizer.zero_grad()
             with autocast('cuda'):
                 preds = model(inputs)
 
                 mask_sum = masks.sum()
-                batch_se = se(preds, targets, masks)
+                batch_se = se(preds, targets, masks, wall_density_alphas)
                 batch_mse = batch_se / masks.sum()
                 
                 # Use SIP2Net loss if requested
@@ -106,11 +110,13 @@ def train_model(model, train_loader, val_samples, optimizer, scheduler, num_epoc
         scheduler.step(val_loss)
         logger.log_epoch_loss(val_loss, epoch, current_lr)
 
-        # Checkpoint best model
         if val_loss is not None and val_loss < best_loss:
             best_loss = val_loss
             torch.save(model.state_dict(), os.path.join(save_dir, 'best_model.pth'))
             print(f'Saved new best model (Val RMSE: {val_loss:.4f}).')
+
+        if epoch % 5 == 0:
+            torch.save(model.state_dict(), os.path.join(save_dir, f'epoch_{epoch}.pth'))
 
         gc.collect()
         # torch.cuda.empty_cache()

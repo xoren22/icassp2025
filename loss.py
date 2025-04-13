@@ -5,26 +5,12 @@ import piq
 import segmentation_models_pytorch as smp
 
 
-def se(preds, targets, masks):
-    sq_error = (preds - targets)**2 * masks
+def se(preds, targets, masks, wall_density_alpha=1):
+    sq_error = (preds - targets)**2 * masks 
+    sq_error = sq_error * wall_density_alpha.unsqueeze(1).unsqueeze(1)
     sq_error_sum = sq_error.sum()
+    
     return sq_error_sum
-
-def mse(preds, targets, masks):
-    mask_sum = masks.sum()
-    sq_error_sum = se(preds, targets, masks)
-    return sq_error_sum / (mask_sum + 1e-8)
-
-def rmse(preds, targets, masks):
-    mse_loss = mse(preds, targets, masks)
-    return torch.sqrt(mse_loss)
-
-def anchored_mse(preds, targets, masks, anchor, alpha=0.1):
-    main_loss = mse(preds, targets, masks)
-    anchor_loss = mse(preds, anchor, masks)
-
-    weighted_loss = main_loss + alpha * anchor_loss
-    return weighted_loss
 
 
 class CustomGradientDifferenceLoss(nn.Module):
@@ -104,7 +90,7 @@ class SIP2NetLoss(nn.Module):
     """
     SIP2Net loss using library implementations where available
     """
-    def __init__(self, alpha1=500, alpha2=1, alpha3=1, use_mse=True, mse_weight=1.0):
+    def __init__(self, ssim_alpha=500, gdl_alpha=1, f1_alpha=1, use_mse=True, mse_weight=1.0):
         super().__init__()
         
         # Use PIQ for SSIM (higher quality implementation)
@@ -116,9 +102,9 @@ class SIP2NetLoss(nn.Module):
         # Use a custom F1 loss that works better for regression
         self.f1_loss = CustomF1Loss()
             
-        self.alpha1 = alpha1
-        self.alpha2 = alpha2
-        self.alpha3 = alpha3
+        self.ssim_alpha = ssim_alpha
+        self.gdl_alpha = gdl_alpha
+        self.f1_alpha = f1_alpha
         self.use_mse = use_mse
         self.mse_weight = mse_weight
     
@@ -150,7 +136,7 @@ class SIP2NetLoss(nn.Module):
         f1 = self.f1_loss(pred, target, mask)
         
         # Combine losses
-        sip2net_loss = self.alpha1 * ssim + self.alpha2 * gdl + self.alpha3 * f1
+        sip2net_loss = self.ssim_alpha * ssim + self.gdl_alpha * gdl + self.f1_alpha * f1
         
         # Add MSE if requested
         if self.use_mse and mask is not None:
@@ -174,24 +160,24 @@ class SIP2NetLoss(nn.Module):
         return total_loss, components
 
 
-def create_sip2net_loss(use_mse=True, mse_weight=0.5, alpha1=500, alpha2=1, alpha3=1):
+def create_sip2net_loss(use_mse=True, mse_weight=0.5, ssim_alpha=500, gdl_alpha=1, f1_alpha=1):
     """
     Create a SIP2Net loss instance with specified parameters
     
     Args:
         use_mse: Whether to include MSE in the total loss
         mse_weight: Weight of MSE component relative to SIP2Net losses
-        alpha1: Weight of SSIM loss
-        alpha2: Weight of Gradient Difference loss
-        alpha3: Weight of F1 loss
+        ssim_alpha: Weight of SSIM loss
+        gdl_alpha: Weight of Gradient Difference loss
+        f1_alpha: Weight of F1 loss
         
     Returns:
         SIP2NetLoss instance
     """
     return SIP2NetLoss(
-        alpha1=alpha1,
-        alpha2=alpha2,
-        alpha3=alpha3,
+        ssim_alpha=ssim_alpha,
+        gdl_alpha=gdl_alpha,
+        f1_alpha=f1_alpha,
         use_mse=use_mse,
         mse_weight=mse_weight
     )
@@ -200,7 +186,7 @@ def create_sip2net_loss(use_mse=True, mse_weight=0.5, alpha1=500, alpha2=1, alph
 
 if __name__ == "__main__":
     print("Testing SIP2Net Loss...")
-    criterion = create_sip2net_loss(use_mse=True, mse_weight=0.5, alpha1=500, alpha2=1, alpha3=1)
+    criterion = create_sip2net_loss(use_mse=True, mse_weight=0.5, ssim_alpha=500, gdl_alpha=1, f1_alpha=1)
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
     print(f"Using device: {device}")
     batch_size, h, w = 2, 16, 16
