@@ -15,12 +15,13 @@ def resize_linear(img, new_size):
     return TF.resize(img, new_size, interpolation=InterpolationMode.BILINEAR)
 
 def resize_db(img, new_size):
-    lin_energy = 10.0 ** (img / 10.0)
+    img = img.to(torch.float64)
+    lin_energy = 10.0 ** (-img / 10.0)
     lin_rs = TF.resize(lin_energy, new_size, interpolation=InterpolationMode.BILINEAR)
     img_rs = torch.zeros_like(lin_rs)
     valid_mask = lin_rs > 0
-    img_rs[valid_mask] = 10.0 * torch.log10(lin_rs[valid_mask])
-    
+    img_rs[valid_mask] = -10.0 * torch.log10(lin_rs[valid_mask])
+
     return img_rs
 
 
@@ -31,11 +32,12 @@ def rotate_linear(img, angle):
     return TF.rotate(img, angle, interpolation=InterpolationMode.BILINEAR, fill=0, expand=True)
 
 def rotate_db(img, angle):
-    lin_energy = 10.0 ** (img / 10.0)
+    img = img.to(torch.float64)
+    lin_energy = 10.0 ** (-img / 10.0)
     lin_rs = TF.rotate(lin_energy, angle, interpolation=InterpolationMode.BILINEAR, fill=0, expand=True)
     img_rs = torch.zeros_like(lin_rs)
     valid_mask = lin_rs > 0
-    img_rs[valid_mask] = 10.0 * torch.log10(lin_rs[valid_mask])
+    img_rs[valid_mask] = -10.0 * torch.log10(lin_rs[valid_mask])
     return img_rs
 
 

@@ -1,6 +1,7 @@
 import torch
 import numpy as np
 from numba import njit
+from scipy.ndimage import gaussian_filter
 
 from _types import RadarSample
 
@@ -77,9 +78,11 @@ def _calculate_transmittance_loss_numpy(transmittance_matrix, x_ant, y_ant, n_an
     return output
 
 
-def calculate_transmittance_loss(transmittance_matrix, x_ant, y_ant, n_angles=360*128/1, radial_step=1.0, max_walls=10):
+def calculate_transmittance_loss(transmittance_matrix, x_ant, y_ant, n_angles=360*128*100, radial_step=1.0, max_walls=10, smooth=False):
     transmittance_np = transmittance_matrix.cpu().numpy()
     output_np = _calculate_transmittance_loss_numpy(transmittance_np, x_ant, y_ant, n_angles, radial_step, max_walls)
+    if smooth:
+        output_np = gaussian_filter(output_np, sigma=2.0, mode='reflect')
     return torch.from_numpy(output_np).to(device=torch.device('cpu'))
 
 
@@ -116,22 +119,17 @@ def calculate_antenna_gain(radiation_pattern, W, H, azimuth, x_ant, y_ant):
 
 
 def normalize_input(input_tensor):
-    min_antenna_gain = -55.0
-    mean = torch.tensor([0.485, 0.456, 0.406])
-    std = torch.tensor([0.229, 0.224, 0.225])
-
     normalized = input_tensor.clone()
-    for i in range(2):
-        normalized[i] = (normalized[i] / 255.0 - mean[i]) / std[i]
-    normalized[2] = torch.log10(1 + normalized[2])
-    normalized[3] = normalized[3] / min_antenna_gain
-    normalized[4] = torch.log10(normalized[4]) - 1.9  # "magic shift"
-    normalized[5] = normalized[5] / 100.0 # this feature mask has values < 300
-
+    normalized[0] = normalized[0] / 10.0 # reflecatnace is ~12
+    normalized[1] = normalized[1] / 10.0 # transmittance is ~12
+    normalized[2] = normalized[2]  / 35.0 # max fspl are in range 25~43
+    normalized[3] = torch.log10(normalized[3]) - np.log10([868, 1800, 3500]).mean()  # frequency in MHz
+    normalized[4] = normalized[4] / 100.0 # fspl+tranmittance has values < 300
+    # normalized[5] is the mask and is left as is
     return normalized
 
 
-def featurizer(sample: RadarSample) -> torch.Tensor:
+def featurize_inputs(sample: RadarSample) -> torch.Tensor:
     reflectance = sample.input_img[0]  # First channel
     transmittance = sample.input_img[1]  # Second channel
     distance = sample.input_img[2]  # Third channel
@@ -163,18 +161,17 @@ def featurizer(sample: RadarSample) -> torch.Tensor:
     
     fs_plus_transmittance_loss = free_space_pathloss + transmittance_loss
 
-    # Build input tensor: [7, H, W] - Already in correct (C, H, W) format
-    input_tensor = torch.zeros((7, sample.H, sample.W), dtype=torch.float32, device=torch.device('cpu'))
+    # Build input tensor: [6, H, W] - Already in correct (C, H, W) format
+    input_tensor = torch.zeros((6, sample.H, sample.W), dtype=torch.float32, device=torch.device('cpu'))
     input_tensor[0] = reflectance  # reflectance
     input_tensor[1] = transmittance  # transmittance
-    input_tensor[2] = distance  # distance
-    input_tensor[3] = antenna_gain
-    input_tensor[4] = torch.full((sample.H, sample.W), sample.freq_MHz, dtype=torch.float32, device=torch.device('cpu'))
-    input_tensor[5] = fs_plus_transmittance_loss
+    input_tensor[2] = free_space_pathloss  # distance
+    input_tensor[3] = torch.full((sample.H, sample.W), sample.freq_MHz, dtype=torch.float32, device=torch.device('cpu'))
+    input_tensor[4] = fs_plus_transmittance_loss
 
     input_tensor = normalize_input(input_tensor)
 
     mask = sample.mask
-    input_tensor[6] = mask
+    input_tensor[5] = mask
     
     return input_tensor

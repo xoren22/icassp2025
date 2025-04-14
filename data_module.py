@@ -1,12 +1,12 @@
-import os
 import torch
 import numpy as np
 import pandas as pd
+from tqdm import tqdm
 from typing import Union
 from torch.utils.data import Dataset
 from torchvision.io import read_image
 
-from featurizer import featurizer
+from featurizer import featurize_inputs
 from augmentations import normalize_size
 from _types import RadarSample, RadarSampleInputs
 
@@ -69,8 +69,15 @@ class PathlossDataset(Dataset):
         self.augmentations = augmentations
 
         self.target_size = IMG_TARGET_SIZE
-        self.featurizer = featurizer
-    
+        self.samples = self._preprocess_samples(self.inputs_list)
+   
+    def _preprocess_samples(self, inputs_list):
+        samples = []
+        for inp in tqdm(inputs_list, "Preprocessing samples: "):
+            sample = read_sample(inp)
+            sample = normalize_size(sample=sample, target_size=self.target_size)
+            samples.append(sample)
+        return samples    
 
 
     def __len__(self):
@@ -78,14 +85,12 @@ class PathlossDataset(Dataset):
 
 
     def __getitem__(self, idx):
-        inp = self.inputs_list[idx]
-        sample = read_sample(inp)
-        sample = normalize_size(sample=sample, target_size=self.target_size)
+        sample = self.samples[idx]
         if self.augmentations is not None:
             sample = self.augmentations(sample)
 
         output_tensor = sample.output_img if sample.output_img is not None else None
-        input_tensor = self.featurizer(sample=sample)
+        input_tensor = featurize_inputs(sample=sample)
         mask = sample.mask
 
         return input_tensor, output_tensor, mask   

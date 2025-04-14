@@ -53,19 +53,19 @@ class ASPPModule(nn.Module):
 
 
 class UNetModel(nn.Module):
-    def __init__(self, n_channels=7):
+    def __init__(self, n_channels=6):
         super(UNetModel, self).__init__()
         
         self.unet = smp.Unet(
-            encoder_name="resnet101",  # Changed from resnet18 to resnet34
+            encoder_name="resnet18",  # Changed from resnet18 to resnet18
             in_channels=n_channels,
             classes=1,
             activation=None
         )
         
-        # ResNet101 bottleneck still has 2048 channels like ResNet18,
+        # resnet18 bottleneck still has 512 channels like ResNet18,
         # but the network is deeper with more layers
-        self.aspp = ASPPModule(in_channels=2048, out_channels=2048)
+        self.aspp = ASPPModule(in_channels=512, out_channels=512)
 
     def forward(self, x):
         features = self.unet.encoder(x)

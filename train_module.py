@@ -11,9 +11,9 @@ from inference import PathlossPredictor
 from loss import se, create_sip2net_loss
 
 
-def evaluate_model(model, val_samples, device, batch_size=8):
-    inference_model = PathlossPredictor(model=model)
-    inference_model.model.to(device)  # if not already on device
+def evaluate_model(model, val_samples, device, batch_size=8, inference_model=None):
+    inference_model.model = model
+    inference_model.model.to(device)
 
     preds_list, targets_list = [], []
     val_samples = list(val_samples)
@@ -42,27 +42,20 @@ def evaluate_model(model, val_samples, device, batch_size=8):
 
     return val_rmse
 
-def evaluate_model(model, val_samples, device, batch_size=8):
-    return 1 / time()
+# def evaluate_model(model, val_samples, device, batch_size=8, inference_model=None):
+#     return 1 / time()
 
-def train_model(model, train_loader, val_samples, optimizer, scheduler, num_epochs, save_dir, logger, device=None, use_sip2net=False, sip2net_params=None):
+def train_model(model, train_loader, val_samples, optimizer, scheduler, num_epochs, save_dir, logger, device=None, use_sip2net=False, sip2net_params={}):
     os.makedirs(save_dir, exist_ok=True)
     model.to(device)
     best_loss = float('inf')
     scaler = GradScaler(enabled=True)
+    inference_model = PathlossPredictor(model=model)
     
     # Setup SIP2Net loss if requested
     if use_sip2net:
-        if sip2net_params is None:
-            sip2net_params = {}
-        sip2net_criterion = create_sip2net_loss(
-            use_mse=True,
-            mse_weight=sip2net_params.get('mse_weight', 1.0),
-            alpha1=sip2net_params.get('alpha1', 500.0),
-            alpha2=sip2net_params.get('alpha2', 1.0),
-            alpha3=sip2net_params.get('alpha3', 0.0)
-        )
         print(f"Using SIP2Net loss")
+        sip2net_criterion = create_sip2net_loss(use_mse=True, **sip2net_params)
 
     for epoch in range(num_epochs):
         print(f'Epoch {epoch+1}/{num_epochs}\n{"-"*10}')
@@ -94,10 +87,9 @@ def train_model(model, train_loader, val_samples, optimizer, scheduler, num_epoc
             logger.log_batch_loss(batch_se.item(), mask_sum.item())
 
             del inputs, targets, masks, preds, batch_se, batch_mse, loss, mask_sum
-            # torch.cuda.empty_cache()
 
         t0 = time()
-        val_loss = evaluate_model(model, val_samples, device=device)
+        val_loss = evaluate_model(model, val_samples, device=device, inference_model=inference_model)
         print(f"Validation RMSE: {val_loss} taking {time() - t0}")
 
         current_lr = optimizer.param_groups[0]['lr']
@@ -111,4 +103,3 @@ def train_model(model, train_loader, val_samples, optimizer, scheduler, num_epoc
             print(f'Saved new best model (Val RMSE: {val_loss:.4f}).')
 
         gc.collect()
-        # torch.cuda.empty_cache()
