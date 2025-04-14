@@ -7,7 +7,7 @@ from _types import RadarSample
 
 
 @njit
-def _calculate_transmittance_loss_numpy(transmittance_matrix, x_ant, y_ant, n_angles=360*128/1, radial_step=1.0, max_walls=10):
+def _calculate_transmittance_loss_numpy(transmittance_matrix, x_ant, y_ant, n_angles, radial_step, max_walls):
     """
     Numpy implementation for numba optimization.
     This function must stay as numpy for numba to work.
@@ -77,16 +77,15 @@ def _calculate_transmittance_loss_numpy(transmittance_matrix, x_ant, y_ant, n_an
     
     return output
 
+_calculate_transmittance_loss_numpy(np.array([[1]]), 0, 0, 2, 2, 2)
 
-def calculate_transmittance_loss(transmittance_matrix, x_ant, y_ant, n_angles=360*128*100, radial_step=1.0, max_walls=10, smooth=False):
+
+def calculate_transmittance_loss(transmittance_matrix, x_ant, y_ant, n_angles=360*128*1, radial_step=1.0, max_walls=10, smooth=True):
     transmittance_np = transmittance_matrix.cpu().numpy()
     output_np = _calculate_transmittance_loss_numpy(transmittance_np, x_ant, y_ant, n_angles, radial_step, max_walls)
     if smooth:
         output_np = gaussian_filter(output_np, sigma=2.0, mode='reflect')
     return torch.from_numpy(output_np).to(device=torch.device('cpu'))
-
-
-_calculate_transmittance_loss_numpy(np.array([[1]]), 0, 0)
 
 
 def calculate_fspl(

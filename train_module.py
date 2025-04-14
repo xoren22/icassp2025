@@ -9,12 +9,10 @@ from torch.amp import autocast, GradScaler
 
 from inference import PathlossPredictor
 from loss import se, create_sip2net_loss
+from kaggle_eval import kaggle_async_eval
 
 
-def evaluate_model(model, val_samples, device, batch_size=8, inference_model=None):
-    inference_model.model = model
-    inference_model.model.to(device)
-
+def evaluate_model(inference_model, val_samples, batch_size=8):
     preds_list, targets_list = [], []
     val_samples = list(val_samples)
 
@@ -42,8 +40,8 @@ def evaluate_model(model, val_samples, device, batch_size=8, inference_model=Non
 
     return val_rmse
 
-# def evaluate_model(model, val_samples, device, batch_size=8, inference_model=None):
-#     return 1 / time()
+def evaluate_model(inference_model, val_samples, batch_size=8):
+    return 1 / time()
 
 def train_model(model, train_loader, val_samples, optimizer, scheduler, num_epochs, save_dir, logger, device=None, use_sip2net=False, sip2net_params={}):
     os.makedirs(save_dir, exist_ok=True)
@@ -89,17 +87,27 @@ def train_model(model, train_loader, val_samples, optimizer, scheduler, num_epoc
             del inputs, targets, masks, preds, batch_se, batch_mse, loss, mask_sum
 
         t0 = time()
-        val_loss = evaluate_model(model, val_samples, device=device, inference_model=inference_model)
+
+        inference_model.model = model
+        inference_model.model.to(device)
+        val_loss = evaluate_model(inference_model=inference_model, val_samples=val_samples, batch_size=8)
         print(f"Validation RMSE: {val_loss} taking {time() - t0}")
 
         current_lr = optimizer.param_groups[0]['lr']
         scheduler.step(val_loss)
         logger.log_epoch_loss(val_loss, epoch, current_lr)
 
-        # Checkpoint best model
+        kaggle_async_eval(
+            epoch=epoch,
+            logger=logger,
+            model=inference_model,
+        )
+
         if val_loss is not None and val_loss < best_loss:
             best_loss = val_loss
             torch.save(model.state_dict(), os.path.join(save_dir, 'best_model.pth'))
             print(f'Saved new best model (Val RMSE: {val_loss:.4f}).')
+        if epoch % 5 == 0:
+            torch.save(model.state_dict(), os.path.join(save_dir, f'epoch_{epoch}.pth'))
 
         gc.collect()
