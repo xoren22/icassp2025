@@ -214,6 +214,7 @@ def _calculate_transmittance_loss_numpy(
 
     return output
 
+
 def calculate_transmittance_loss(
     transmittance_matrix: torch.Tensor,
     x_ant: float,
@@ -228,6 +229,7 @@ def calculate_transmittance_loss(
     )
     np.clip(output_np, 0.0, 160.0)
     return torch.from_numpy(output_np)
+
 
 def calculate_distance(x_ant, y_ant, H, W, pixel_size):
     """
@@ -271,6 +273,7 @@ class Approx:
         )
         approx = trans_loss_smooth + fspl
         approx = torch.round(approx-0.5)
+        approx = torch.clip(approx, 0, 200)
 
         return approx
     
@@ -284,6 +287,6 @@ class Approx:
 kaggle_async_eval(
     epoch=1,
     model=Approx(),
-    csv_save_path="/Users/xoren/Desktop/Task2.csv",
+    csv_save_path="/auto/home/xoren/Desktop/Task2.csv",
     submission_message="Approx."
 )

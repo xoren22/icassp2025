@@ -7,85 +7,128 @@ from _types import RadarSample
 
 
 @njit
-def _calculate_transmittance_loss_numpy(transmittance_matrix, x_ant, y_ant, n_angles, radial_step, max_walls):
+def _calculate_transmittance_loss_numpy(
+    transmittance_matrix,
+    x_ant,
+    y_ant,
+    n_angles=360*128,
+    radial_step=1.0,
+    max_walls=10,
+):
     """
-    Numpy implementation for numba optimization.
-    This function must stay as numpy for numba to work.
+    Numba-accelerated function that casts 'n_angles' rays from (x_ant, y_ant).
+    On each crossing from positive->zero in transmittance_matrix, we add path-loss
+    to sum_loss. If sum_loss exceeds 160, we clip to 160 and stop the ray.
     """
     h, w = transmittance_matrix.shape
-    dtheta = 2.0 * np.pi / n_angles
     output = np.zeros((h, w), dtype=transmittance_matrix.dtype)
-    
+    counts = np.zeros((h, w), dtype=np.float32)
+
+    dtheta = 2.0 * np.pi / n_angles
+    max_dist = np.sqrt(w*w + h*h)
     cos_vals = np.cos(np.arange(n_angles) * dtheta)
     sin_vals = np.sin(np.arange(n_angles) * dtheta)
-    max_dist = np.sqrt(w*w + h*h)
-    
-    for i in range(n_angles):
+
+    for i in range(int(n_angles)):
         cos_t = cos_vals[i]
         sin_t = sin_vals[i]
-        
         sum_loss = 0.0
         last_val = None
         wall_count = 0
         r = 0.0
-        
+
         while r <= max_dist:
             x = x_ant + r * cos_t
             y = y_ant + r * sin_t
-            
+
             px = int(round(x))
             py = int(round(y))
-            
+            # Out of bounds => optionally add last_val, then break
             if px < 0 or px >= w or py < 0 or py >= h:
                 if last_val is not None and last_val > 0:
                     sum_loss += last_val
-                    wall_count += 1
-                    if wall_count >= max_walls:
-                        pass  # Already out of bounds, so we do nothing more
+                    # Check for 160 limit
+                    if sum_loss > 160:
+                        sum_loss = 160
                 break
-            
+
             val = transmittance_matrix[py, px]
-            
             if last_val is None:
                 last_val = val
 
+            # Detect crossing from positive->zero => add last_val
             if val != last_val:
                 if last_val > 0 and val == 0:
                     sum_loss += last_val
+                    # If exceeding 160, stop the ray
+                    if sum_loss > 160:
+                        sum_loss = 160
+                        break
                     wall_count += 1
                     if wall_count >= max_walls:
+                        # fill remainder with sum_loss
                         r_temp = r
                         while r_temp <= max_dist:
                             x_temp = x_ant + r_temp * cos_t
                             y_temp = y_ant + r_temp * sin_t
                             px_temp = int(round(x_temp))
                             py_temp = int(round(y_temp))
-                            
                             if px_temp < 0 or px_temp >= w or py_temp < 0 or py_temp >= h:
                                 break
-                            
-                            if output[py_temp, px_temp] == 0 or sum_loss < output[py_temp, px_temp]:
+                            # average sum_loss into that pixel
+                            if counts[py_temp, px_temp] == 0:
                                 output[py_temp, px_temp] = sum_loss
+                                counts[py_temp, px_temp] = 1
+                            else:
+                                old_val = output[py_temp, px_temp]
+                                old_count = counts[py_temp, px_temp]
+                                new_val = (old_val*old_count + sum_loss)/(old_count+1)
+                                output[py_temp, px_temp] = new_val
+                                counts[py_temp, px_temp] += 1
                             r_temp += radial_step
                         break
                 last_val = val
-            
-            if output[py, px] == 0 or (sum_loss < output[py, px]):
+
+            # Average current sum_loss into (px, py)
+            if counts[py, px] == 0:
                 output[py, px] = sum_loss
-            
+                counts[py, px] = 1
+            else:
+                old_val = output[py, px]
+                old_count = counts[py, px]
+                new_val = (old_val*old_count + sum_loss)/(old_count+1)
+                output[py, px] = new_val
+                counts[py, px] += 1
+
+            # If we've hit max walls, stop
+            if wall_count >= max_walls:
+                break
+
+            # Finally, if sum_loss has grown above 160 at any point, clip & stop
+            if sum_loss > 160:
+                sum_loss = 160
+                break
+
             r += radial_step
-    
+
     return output
 
-_calculate_transmittance_loss_numpy(np.array([[1]]), 0, 0, 2, 2, 2)
+
+def calculate_transmittance_loss(
+    transmittance_matrix: torch.Tensor,
+    x_ant: float,
+    y_ant: float,
+    n_angles=360*128,
+    radial_step=1.0,
+    max_walls=10,
+) -> torch.Tensor:
+    trans_np = transmittance_matrix.cpu().numpy()
+    output_np = _calculate_transmittance_loss_numpy(
+        trans_np, x_ant, y_ant, n_angles, radial_step, max_walls
+    )
+    return torch.from_numpy(output_np)
 
 
-def calculate_transmittance_loss(transmittance_matrix, x_ant, y_ant, n_angles=360*128*1, radial_step=1.0, max_walls=10, smooth=True):
-    transmittance_np = transmittance_matrix.cpu().numpy()
-    output_np = _calculate_transmittance_loss_numpy(transmittance_np, x_ant, y_ant, n_angles, radial_step, max_walls)
-    if smooth:
-        output_np = gaussian_filter(output_np, sigma=2.0, mode='reflect')
-    return torch.from_numpy(output_np).to(device=torch.device('cpu'))
 
 
 def calculate_fspl(
@@ -128,7 +171,7 @@ def normalize_input(input_tensor):
     return normalized
 
 
-def featurize_inputs(sample: RadarSample) -> torch.Tensor:
+def featurize_inputs(sample: RadarSample, is_test_set=False) -> torch.Tensor:
     reflectance = sample.input_img[0]  # First channel
     transmittance = sample.input_img[1]  # Second channel
     distance = sample.input_img[2]  # Third channel
@@ -158,7 +201,10 @@ def featurize_inputs(sample: RadarSample) -> torch.Tensor:
         sample.y_ant
     )
     
+    clip_value = 200. if is_test_set else 160.
     fs_plus_transmittance_loss = free_space_pathloss + transmittance_loss
+    fs_plus_transmittance_loss = torch.round(fs_plus_transmittance_loss-0.5)
+    fs_plus_transmittance_loss = torch.clip(fs_plus_transmittance_loss, 0, clip_value)
 
     # Build input tensor: [6, H, W] - Already in correct (C, H, W) format
     input_tensor = torch.zeros((6, sample.H, sample.W), dtype=torch.float32, device=torch.device('cpu'))

@@ -55,7 +55,7 @@ class PathlossPredictor:
                 scaling_factor = INITIAL_PIXEL_SIZE / sample.pixel_size
                 norm_h, norm_w = int(old_h * scaling_factor), int(old_w * scaling_factor)
 
-                input_tensor = featurize_inputs(sample).to(device)
+                input_tensor = featurize_inputs(sample, is_test_set=True).to(device)
 
                 if use_cache:
                     self.sample_cache[cache_key] = {

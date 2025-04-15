@@ -92,8 +92,8 @@ def main():
         [
             GeometricAugmentation(
                 p=0.5,
-                angle_range=(-30, 30),
-                scale_range=(1/1.5, 1.5),
+                # angle_range=(-30, 30),
+                # scale_range=(1/1.5, 1.5),
                 flip_vertical=True,
                 flip_horizontal=True,
                 cardinal_rotation=True,
