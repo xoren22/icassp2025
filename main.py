@@ -120,6 +120,7 @@ def main():
         device=device, 
         save_dir=MODEL_SAVE_PATH, # "/dev/null"
         use_sip2net=True,
+        sip2net_params={"mse_weight": 0.01}
     )
 
 if __name__ == "__main__":
