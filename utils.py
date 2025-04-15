@@ -58,24 +58,9 @@ def evaluate_fspl(output_img, fspl):
     print("-"*100, "\n\n")
 
 
-
-def plot_before_after(matrix_before, matrix_after, figsize=(12, 5)):
-    fig, axes = plt.subplots(1, 2, figsize=figsize)
-    
-    im1 = axes[0].imshow(matrix_before, cmap='coolwarm')
-    axes[0].set_title("Before")
-    fig.colorbar(im1, ax=axes[0], fraction=0.046, pad=0.04)
-    
-    im2 = axes[1].imshow(matrix_after, cmap='coolwarm')
-    axes[1].set_title("After")
-    fig.colorbar(im2, ax=axes[1], fraction=0.046, pad=0.04)
-    
-    plt.tight_layout()
-    return fig, axes
-
 def matrix_to_image(*matrices, titles=None, save_path=None):
     n = abs(int(matrices[1].sum()))
-    save_path = save_path or f"/Users/xoren/icassp2025/foo/1_{n}.png"
+    save_path = save_path or f"/auto/home/xoren/icassp2025/foo/1_{n}.png"
     if len(matrices) < 2:
         raise ValueError("At least two matrices are required: 1 ground truth + 1 comparison.")
 
@@ -175,7 +160,7 @@ def split_data_task1(inputs_list: List[RadarSampleInputs], val_ratio=0.25, split
 
 
 def split_data_task2(inputs_list: List[RadarSampleInputs], val_freqs, split_save_path=None):
-    # inputs_list = np.random.choice(inputs_list, 200) # TODO remove after debug
+    # inputs_list = np.random.choice(inputs_list, 100) # TODO remove after debug
     train_inputs, val_inputs = split_data_task1(inputs_list)
     val_freqs = val_freqs if isinstance(val_freqs, list) else [val_freqs]
     val_inputs = [f for f in val_inputs if f.ids[2] in val_freqs]
@@ -190,6 +175,20 @@ def split_data_task2(inputs_list: List[RadarSampleInputs], val_freqs, split_save
             )
     return train_inputs, val_inputs
 
+def plot_before_after(matrix_before, matrix_after, figsize=(12, 5)):
+    fig, axes = plt.subplots(1, 2, figsize=figsize)
+    
+    im1 = axes[0].imshow(matrix_before, cmap='coolwarm')
+    axes[0].set_title("Before")
+    fig.colorbar(im1, ax=axes[0], fraction=0.046, pad=0.04)
+    
+    im2 = axes[1].imshow(matrix_after, cmap='coolwarm')
+    axes[1].set_title("After")
+    fig.colorbar(im2, ax=axes[1], fraction=0.046, pad=0.04)
+    
+    plt.tight_layout()
+    return fig, axes
+
 def calculate_distance(x_ant, y_ant, H, W, pixel_size):
     y_grid, x_grid = torch.meshgrid(
         torch.arange(H, dtype=torch.float32, device=torch.device('cpu')),
@@ -197,16 +196,4 @@ def calculate_distance(x_ant, y_ant, H, W, pixel_size):
         indexing='ij'
     )
     return torch.sqrt((x_grid - x_ant)**2 + (y_grid - y_ant)**2) * pixel_size
-
-
-def combine_incoherent_sum_db(maps_db):
-    if not maps_db:
-        raise ValueError("No pathloss maps provided.")
-    power_fractions = [10.0 ** (-pl_db / 10.0) for pl_db in maps_db]
-    total_fraction = torch.zeros_like(power_fractions[0])
-    for frac in power_fractions:
-        total_fraction += frac
-    combined_pathloss_db = -10.0 * torch.log10(total_fraction)
-    
-    return combined_pathloss_db
 

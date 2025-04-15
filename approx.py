@@ -4,19 +4,12 @@ import os
 import torch
 import numpy as np
 import pandas as pd
-import pickle as pkl
-from tqdm import tqdm
 from numba import njit
-from dataclasses import dataclass, asdict
-from typing import Union, Tuple, Optional, List
 from torchvision.io import read_image
 from scipy.ndimage import gaussian_filter
-
-from matplotlib import pyplot as plt
-
-################################################################################
-# Data structures and sample reading
-################################################################################
+from kaggle_eval import kaggle_async_eval
+from dataclasses import dataclass, asdict
+from typing import Union, Tuple, Optional, List
 
 @dataclass
 class RadarSample:
@@ -113,9 +106,6 @@ def read_sample(inputs: Union[RadarSampleInputs, dict]) -> RadarSample:
     )
     return sample
 
-################################################################################
-# Approximation logic: FSPL + transmittance + optional Gaussian smoothing
-################################################################################
 
 @njit
 def _calculate_transmittance_loss_numpy(
@@ -291,7 +281,6 @@ class Approx:
         return predictions
 
 
-from kaggle_eval import kaggle_async_eval
 kaggle_async_eval(
     epoch=1,
     model=Approx(),

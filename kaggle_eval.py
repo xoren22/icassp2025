@@ -1,5 +1,3 @@
-# kaggle_eval.py
-
 import time
 import threading
 import numpy as np
@@ -25,9 +23,9 @@ def _generate_solution_df(model: PathlossPredictor, verbose=False, batch_size=8)
                 samples.append({
                     'freq_MHz': freq_mhz,
                     'sampling_position': sp,
-                    'input_file': f"/Users/xoren/icassp2025/data/kaggle/Inputs/Task_2/B{b}_Ant1_f{f_i}_S{sp}.png",
-                    'position_file': f"/Users/xoren/icassp2025/data/kaggle/Positions/Positions_B{b}_Ant1_f{f_i}.csv",
-                    'radiation_pattern_file': '/Users/xoren/icassp2025/data/kaggle/Radiation_Patterns/Ant1_Pattern.csv',
+                    'input_file': f"/auto/home/xoren/icassp2025/data/kaggle/Evaluation_Data_T2/Inputs/Task_2/B{b}_Ant1_f{f_i}_S{sp}.png",
+                    'position_file': f"/auto/home/xoren/icassp2025/data/kaggle/Evaluation_Data_T2/Positions/Positions_B{b}_Ant1_f{f_i}.csv",
+                    'radiation_pattern_file': '/auto/home/xoren/icassp2025/data/kaggle/Evaluation_Data_T2/Radiation_Patterns/Ant1_Pattern.csv',
                     # We'll store the ID prefix for generating row labels later
                     'id_prefix': sample_id_prefix
                 })
@@ -93,7 +91,7 @@ def _kaggle_eval_thread_fn(
     epoch: int,
     model,
     logger,
-    csv_save_path: str = "/Users/xoren/Task2.csv",
+    csv_save_path: str = "/auto/home/xoren/Task2.csv",
     competition: str = "indoor-pathloss-radio-map-prediction-task-2",
     submission_message: str = "My auto submission",
 ):
@@ -117,7 +115,7 @@ def kaggle_async_eval(
     model_ckpt_path=None,
     model=None,
     logger=None,
-    csv_save_path: str = "/Users/xoren/Task2.csv",
+    csv_save_path: str = "/auto/home/xoren/Task2.csv",
     competition: str = "indoor-pathloss-radio-map-prediction-task-2",
     submission_message: str = "My auto submission",
 ):
@@ -130,4 +128,11 @@ def kaggle_async_eval(
     thread.start()
 
 
+
+if __name__ == "__main__":
+    model_ckpt_path = '/auto/home/xoren/icassp2025/models/best_model.pth'
+    kaggle_async_eval(
+        epoch=1,
+        model_ckpt_path=model_ckpt_path,
+    )
 

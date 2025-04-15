@@ -17,7 +17,6 @@ def read_sample(inputs: Union[RadarSampleInputs, dict]):
     if isinstance(inputs, RadarSampleInputs):
         inputs = inputs.asdict()
 
-    ids = inputs["ids"]
     freq_MHz = inputs["freq_MHz"]
     input_file = inputs["input_file"]
     output_file = inputs.get("output_file")
@@ -25,7 +24,7 @@ def read_sample(inputs: Union[RadarSampleInputs, dict]):
     sampling_position = inputs["sampling_position"]
     radiation_pattern_file = inputs["radiation_pattern_file"]
     
-    input_img = read_image(input_file).float()[:2] # distance channel is redundant, can be calculated from pixel_size, x_ant and y_ant
+    input_img = read_image(input_file).float()
     C, H, W = input_img.shape
     
     output_img = None
@@ -41,18 +40,17 @@ def read_sample(inputs: Union[RadarSampleInputs, dict]):
     radiation_pattern = torch.from_numpy(radiation_pattern_np).float()
 
     sample = RadarSample(
-        ids=np.array(ids),
         H=H,
         W=W,
+        x_ant=x_ant,
+        y_ant=y_ant,
+        azimuth=azimuth,
+        freq_MHz=freq_MHz,
         input_img=input_img,
         output_img=output_img,
         pixel_size=INITIAL_PIXEL_SIZE,
         mask=torch.ones((H, W)),
-        x_ant=np.array([x_ant]),
-        y_ant=np.array([y_ant]),
-        azimuth=np.array([azimuth]),
-        freq_MHz=np.array([freq_MHz]),
-        radiation_pattern=[radiation_pattern],
+        radiation_pattern=radiation_pattern,
     )
     
     return sample
@@ -72,29 +70,27 @@ class PathlossDataset(Dataset):
 
         self.target_size = IMG_TARGET_SIZE
         self.samples = self._preprocess_samples(self.inputs_list)
-    
+   
     def _preprocess_samples(self, inputs_list):
         samples = []
         for inp in tqdm(inputs_list, "Preprocessing samples: "):
             sample = read_sample(inp)
             sample = normalize_size(sample=sample, target_size=self.target_size)
             samples.append(sample)
-        return samples
-    
+        return samples    
+
+
     def __len__(self):
         return len(self.inputs_list)
 
 
     def __getitem__(self, idx):
         sample = self.samples[idx]
-        nonzero_count, total = torch.count_nonzero(sample.input_img[0]), torch.prod(torch.tensor(sample.input_img[0].size()))
-        wall_density_alpha = (nonzero_count / total)**2 * 383.37
-
         if self.augmentations is not None:
-            sample = self.augmentations(sample, self.samples)
+            sample = self.augmentations(sample)
 
         output_tensor = sample.output_img if sample.output_img is not None else None
         input_tensor = featurize_inputs(sample=sample)
         mask = sample.mask
 
-        return input_tensor, output_tensor, mask, wall_density_alpha 
+        return input_tensor, output_tensor, mask   

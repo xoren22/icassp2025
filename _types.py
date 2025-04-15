@@ -8,17 +8,17 @@ from typing import Union, Tuple, Optional, List
 class RadarSample:
     H: int
     W: int
-    x_ant: List[float]
-    y_ant: List[float]
-    azimuth: List[float]
-    freq_MHz: List[float]
+    x_ant: float
+    y_ant: float
+    azimuth: float
+    freq_MHz: float
     input_img: torch.Tensor  # In format (C, H, W)
     output_img: torch.Tensor  # In format (H, W) or (1, H, W)
-    radiation_pattern: List[torch.Tensor]
+    radiation_pattern: torch.Tensor
     pixel_size: float = 0.25
     mask: Union[torch.Tensor, None] = None
     ids: Optional[List[Tuple[int, int, int, int]]] = None
-    
+
     def copy(self):
         return RadarSample(
                     self.H,
@@ -34,7 +34,6 @@ class RadarSample:
                     self.mask,
                     self.ids,
                 )
-
 
 @dataclass
 class RadarSampleInputs:

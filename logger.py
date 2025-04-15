@@ -44,7 +44,17 @@ class TrainingLogger:
 
         if learning_rate is not None:
             self.writer.add_scalar("lr", learning_rate, epoch)
+    
+    def log_kaggle_eval(self, kaggle_score, epoch):
+        self.writer.add_scalars(
+            "epoch_rmse",
+            {
+                "kaggle": kaggle_score**0.5, # kaggle scores are in mse, we need rmse
+            },
+            epoch
+        )
+        self.writer.flush()
 
 
-        def close(self):
-            self.writer.close()
+    def close(self):
+        self.writer.close()

@@ -10,12 +10,12 @@ from utils import split_data_task2
 from train_module import train_model
 from _types import RadarSampleInputs
 from data_module import PathlossDataset
-from augmentations import AugmentationPipeline, GeometricAugmentation, CompositeAntennaAugmentation
+from augmentations import AugmentationPipeline, GeometricAugmentation
 
 def main():
     parser = argparse.ArgumentParser(description='Train and evaluate pathloss prediction model')
 
-    parser.add_argument('--num_workers', type=int, default=0, help='number of workers')
+    parser.add_argument('--num_workers', type=int, default=6, help='number of workers')
     
     parser.add_argument('--gpu', type=int, default=None, help='GPU ID to use (default: auto-seleqct)')
     parser.add_argument('--batch_size', type=int, default=8, help='Batch size for training')
@@ -30,12 +30,9 @@ def main():
     if args.gpu is not None:
         device = torch.device(f"cuda:{args.gpu}" if torch.cuda.is_available() else "cpu")
     else:
-        device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+        device = torch.device("cuda:1" if torch.cuda.is_available() else "cpu")
     
     print(f"Using device: {device}")
-    
-    # if torch.cuda.is_available():
-    #     torch.cuda.empty_cache()
     
     # Define paths
     freqs_MHz = [868, 1800, 3500]
@@ -92,19 +89,15 @@ def main():
     print(f"Train: {len(train_files)}, Validation: {len(val_files)}")
     
     augmentations = AugmentationPipeline(
-        p = [1, 1],
-        augmentations = [
+        [
             GeometricAugmentation(
+                p=0.5,
                 angle_range=(-30, 30),
                 scale_range=(1/1.5, 1.5),
                 flip_vertical=True,
                 flip_horizontal=True,
                 cardinal_rotation=True,
             ),
-
-            # CompositeAntennaAugmentation(
-            #     multi_antenna=True
-            # ),
         ]
     )
     
