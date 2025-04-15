@@ -75,7 +75,7 @@ def plot_before_after(matrix_before, matrix_after, figsize=(12, 5)):
 
 def matrix_to_image(*matrices, titles=None, save_path=None):
     n = abs(int(matrices[1].sum()))
-    save_path = save_path or f"/auto/home/xoren/icassp2025/foo/1_{n}.png"
+    save_path = save_path or f"/Users/xoren/icassp2025/foo/1_{n}.png"
     if len(matrices) < 2:
         raise ValueError("At least two matrices are required: 1 ground truth + 1 comparison.")
 
