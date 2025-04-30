@@ -6,6 +6,7 @@ import torchvision.transforms.functional as TF
 from torchvision.transforms.functional import InterpolationMode
 
 from _types import RadarSample
+from featurizer import calculate_transmittance_loss
 
 
 def resize_nearest(img, new_size):
@@ -246,6 +247,49 @@ class GeometricAugmentation(BaseAugmentation):
             sample = self._apply_flipping(sample, flip_h, flip_v)
 
         return sample
+
+
+class RandomWallsAugmentation(BaseAugmentation):
+    """
+    Adds vertical / horizontal walls with random transmittance values.
+    Keeps FSPL-style loss calculation isolated from other geometric ops.
+    """
+    def __init__(
+        self,
+        p: float = 0.5,
+        avg_walls_count: int = 6,
+        transmittance_range: tuple[int, int] = (1, 10),
+    ):
+        self.p = p
+        self.avg_walls_count = avg_walls_count
+        self.transmittance_range = transmittance_range
+
+    def _apply_walls(self, sample: RadarSample) -> RadarSample:
+        new_walls = torch.zeros((sample.H, sample.W), dtype=torch.float32)
+
+        nv = int(np.random.poisson(self.avg_walls_count))
+        nh = int(np.random.poisson(self.avg_walls_count))
+
+        vs = np.random.choice(sample.W, nv, replace=False)
+        hs = np.random.choice(sample.H, nh, replace=False)
+
+        v_vals = torch.randint(*self.transmittance_range, (nv,), dtype=torch.float32)
+        h_vals = torch.randint(*self.transmittance_range, (nh,), dtype=torch.float32)
+
+        new_walls[:, vs] = v_vals
+        new_walls[hs, :] = h_vals.unsqueeze(1)
+
+        tloss = calculate_transmittance_loss(new_walls, sample.x_ant, sample.y_ant)
+
+        sample.input_img[1][sample.mask == 1] += new_walls[sample.mask == 1]
+        sample.output_img[sample.mask == 1] += tloss[sample.mask == 1]
+        sample.input_img[-1][sample.input_img[-1] != 0] = tloss[sample.input_img[-1] != 0]
+        return sample
+
+    def __call__(self, sample: RadarSample) -> RadarSample:
+        if random.random() > self.p:
+            return sample
+        return self._apply_walls(sample)
 
 
 class AugmentationPipeline:

@@ -6,11 +6,11 @@ from torch.utils.data import DataLoader
 
 from model import UNetModel
 from logger import TrainingLogger
-from utils import split_data_task2
+from utils import split_data_task1
 from train_module import train_model
 from _types import RadarSampleInputs
 from data_module import PathlossDataset
-from augmentations import AugmentationPipeline, GeometricAugmentation
+from augmentations import AugmentationPipeline, GeometricAugmentation, RandomWallsAugmentation
 
 def main():
     parser = argparse.ArgumentParser(description='Train and evaluate pathloss prediction model')
@@ -85,11 +85,14 @@ def main():
     print(f"\nLogging results at {logger.log_dir}\n\n")
 
     split_save_path=os.path.join(logger.log_dir, "train_val_split.pkl")
-    train_files, val_files = split_data_task2(inputs_list, val_freqs=None, split_save_path=split_save_path)
+    train_files, val_files = split_data_task1(inputs_list, split_save_path=split_save_path)# , val_freqs=None)
     print(f"Train: {len(train_files)}, Validation: {len(val_files)}")
     
     augmentations = AugmentationPipeline(
-        [
+        [   
+            RandomWallsAugmentation(
+                p=1,
+            ),
             GeometricAugmentation(
                 p=0.5,
                 # angle_range=(-30, 30),
