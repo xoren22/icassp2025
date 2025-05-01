@@ -38,8 +38,8 @@ def main():
     freqs_MHz = [868, 1800, 3500]
     BASE_DIR = os.path.dirname(os.path.abspath(__file__))
     DATA_DIR = os.path.join(BASE_DIR, args.data_dir)
-    INPUT_PATH = os.path.join(DATA_DIR, f"Inputs/Task_2_ICASSP/")
-    OUTPUT_PATH = os.path.join(DATA_DIR, f"Outputs/Task_2_ICASSP/")
+    INPUT_PATH = os.path.join(DATA_DIR, f"Inputs/Task_1_ICASSP/")
+    OUTPUT_PATH = os.path.join(DATA_DIR, f"Outputs/Task_1_ICASSP/")
     POSITIONS_PATH = os.path.join(DATA_DIR, "Positions/")
     RADIATION_PATTERNS_PATH = os.path.join(DATA_DIR, "Radiation_Patterns/")
     MODEL_SAVE_PATH = os.path.join(BASE_DIR, args.model_dir)

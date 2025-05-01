@@ -1,3 +1,4 @@
+import os
 import time
 import threading
 import numpy as np
@@ -7,6 +8,9 @@ from kaggle.api.kaggle_api_extended import KaggleApi
 
 from inference import PathlossPredictor
 
+
+ROOT = os.path.dirname(__file__)
+
 def _generate_solution_df(model: PathlossPredictor, verbose=False, batch_size=8) -> pd.DataFrame:
     """
     Generate the solution DataFrame with predictions on all required
@@ -14,21 +18,20 @@ def _generate_solution_df(model: PathlossPredictor, verbose=False, batch_size=8)
     groups of `batch_size`.
     """
     # 1) Gather all sample dictionaries.
+    f_i = 1
+    freq_mhz = 868
     samples = []
-    for f_i in [1, 2]:
-        freq_mhz = 868 if f_i == 1 else 2400
-        for b in [1, 5]:
-            for sp in range(25):
-                sample_id_prefix = f"B{b}_Ant1_f{f_i}_S{sp}_"
-                samples.append({
-                    'freq_MHz': freq_mhz,
-                    'sampling_position': sp,
-                    'input_file': f"/auto/home/xoren/icassp2025/data/kaggle/Evaluation_Data_T2/Inputs/Task_2/B{b}_Ant1_f{f_i}_S{sp}.png",
-                    'position_file': f"/auto/home/xoren/icassp2025/data/kaggle/Evaluation_Data_T2/Positions/Positions_B{b}_Ant1_f{f_i}.csv",
-                    'radiation_pattern_file': '/auto/home/xoren/icassp2025/data/kaggle/Evaluation_Data_T2/Radiation_Patterns/Ant1_Pattern.csv',
-                    # We'll store the ID prefix for generating row labels later
-                    'id_prefix': sample_id_prefix
-                })
+    for b in [1, 5]:
+        for sp in range(25):
+            sample_id_prefix = f"B{b}_Ant1_f{f_i}_S{sp}_"
+            samples.append({
+                'freq_MHz': freq_mhz,
+                'sampling_position': sp,
+                'input_file': f"{ROOT}/data/kaggle/Evaluation_Data_T1/Inputs/Task_1/B{b}_Ant1_f{f_i}_S{sp}.png",
+                'position_file': f"{ROOT}/data/kaggle/Evaluation_Data_T1/Positions/Positions_B{b}_Ant1_f{f_i}.csv",
+                'radiation_pattern_file': '{ROOT}/data/kaggle/Evaluation_Data_T1/Radiation_Patterns/Ant1_Pattern.csv',
+                'id_prefix': sample_id_prefix
+            })
 
     # 2) Batch predict and build the solution rows.
     solution_parts = []
@@ -91,9 +94,9 @@ def _kaggle_eval_thread_fn(
     epoch: int,
     model,
     logger,
-    csv_save_path: str = "/auto/home/xoren/Task2.csv",
-    competition: str = "indoor-pathloss-radio-map-prediction-task-2",
-    submission_message: str = "My auto submission",
+    csv_save_path,
+    competition,
+    submission_message,
 ):
     solution_df = _generate_solution_df(model)
     solution_df.to_csv(csv_save_path, index=False)
@@ -115,22 +118,22 @@ def kaggle_async_eval(
     model_ckpt_path=None,
     model=None,
     logger=None,
-    csv_save_path: str = "/auto/home/xoren/Task2.csv",
-    competition: str = "indoor-pathloss-radio-map-prediction-task-2",
-    submission_message: str = "My auto submission",
+    csv_save_path: str = "/auto/home/xoren/Task1.csv",
+    competition: str = "indoor-pathloss-radio-map-prediction-task-1",
+    submission_message: str = "My Task1 auto submission",
 ):
     model = model or PathlossPredictor(model_ckpt_path=model_ckpt_path)
     thread = threading.Thread(
         target=_kaggle_eval_thread_fn,
         args=(epoch, model, logger, csv_save_path, competition, submission_message),
-        daemon=False  # <--- Remove daemon
+        daemon=False,
     )
     thread.start()
 
 
 
 if __name__ == "__main__":
-    model_ckpt_path = '/auto/home/xoren/icassp2025/models/best_model.pth'
+    model_ckpt_path = f'{ROOT}/models/best_model.pth'
     kaggle_async_eval(
         epoch=1,
         model_ckpt_path=model_ckpt_path,
