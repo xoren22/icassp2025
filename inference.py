@@ -1,6 +1,7 @@
 import torch
 from typing import List, Union, Dict
 
+from config import BASE_DIR
 from utils import load_model
 from _types import RadarSampleInputs
 from featurizer import featurize_inputs
@@ -95,9 +96,10 @@ if __name__ == "__main__":
     import pickle as pkl
     from skimage.io import imread
     from utils import matrix_to_image
+    from config import BASE_DIR
 
-    model_path = '/auto/home/xoren/icassp2025/models/best_model.pth'
-    split_file = '/auto/home/xoren/icassp2025/logs/2025-03-28_02-10-49/train_val_split.pkl'
+    model_path = f'{BASE_DIR}/models/best_model.pth'
+    split_file = f'{BASE_DIR}/logs/2025-03-28_02-10-49/train_val_split.pkl'
     with open(split_file, "rb") as f:
         split = pkl.load(f)
     
@@ -111,7 +113,7 @@ if __name__ == "__main__":
     for s, pred, tgt in zip(val_samples, batched_pred, val_targets):
         b, ant, f, sp = s['ids']
         fname = f"B{b}_Ant{ant}_f{f}_S{sp}.png"
-        save_path = f"/auto/home/xoren/icassp2025/foo/{fname}"
+        save_path = f"{BASE_DIR}/foo/{fname}"
         matrix_to_image(tgt, pred, save_path=save_path)
 
     tgt_samples_flat = np.concatenate([A.flatten() for A in val_targets])

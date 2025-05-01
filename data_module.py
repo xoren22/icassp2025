@@ -56,7 +56,7 @@ def read_sample(inputs: Union[RadarSampleInputs, dict]):
     if isinstance(inputs, RadarSampleInputs):
         inputs = inputs.asdict()
 
-    ids = inputs["ids"]
+    ids = inputs.get("ids")
     freq_MHz = inputs["freq_MHz"]
     input_file = inputs["input_file"]
     output_file = inputs.get("output_file")

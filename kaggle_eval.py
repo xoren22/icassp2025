@@ -6,10 +6,9 @@ import pandas as pd
 from tqdm import tqdm
 from kaggle.api.kaggle_api_extended import KaggleApi
 
+from config import BASE_DIR
 from inference import PathlossPredictor
 
-
-ROOT = os.path.dirname(__file__)
 
 def _generate_solution_df(model: PathlossPredictor, verbose=False, batch_size=8) -> pd.DataFrame:
     """
@@ -27,9 +26,9 @@ def _generate_solution_df(model: PathlossPredictor, verbose=False, batch_size=8)
             samples.append({
                 'freq_MHz': freq_mhz,
                 'sampling_position': sp,
-                'input_file': f"{ROOT}/data/kaggle/Evaluation_Data_T1/Inputs/Task_1/B{b}_Ant1_f{f_i}_S{sp}.png",
-                'position_file': f"{ROOT}/data/kaggle/Evaluation_Data_T1/Positions/Positions_B{b}_Ant1_f{f_i}.csv",
-                'radiation_pattern_file': '{ROOT}/data/kaggle/Evaluation_Data_T1/Radiation_Patterns/Ant1_Pattern.csv',
+                'input_file': f"{BASE_DIR}/data/kaggle/Evaluation_Data_T1/Inputs/Task_1/B{b}_Ant1_f{f_i}_S{sp}.png",
+                'position_file': f"{BASE_DIR}/data/kaggle/Evaluation_Data_T1/Positions/Positions_B{b}_Ant1_f{f_i}.csv",
+                'radiation_pattern_file': f'{BASE_DIR}/data/kaggle/Evaluation_Data_T1/Radiation_Patterns/Ant1_Pattern.csv',
                 'id_prefix': sample_id_prefix
             })
 
@@ -118,8 +117,8 @@ def kaggle_async_eval(
     model_ckpt_path=None,
     model=None,
     logger=None,
-    csv_save_path: str = "/auto/home/xoren/Task1.csv",
-    competition: str = "indoor-pathloss-radio-map-prediction-task-1",
+    csv_save_path: str = f"{BASE_DIR}/../Task1.csv",
+    competition: str = "iprm-task-1",
     submission_message: str = "My Task1 auto submission",
 ):
     model = model or PathlossPredictor(model_ckpt_path=model_ckpt_path)
@@ -133,7 +132,7 @@ def kaggle_async_eval(
 
 
 if __name__ == "__main__":
-    model_ckpt_path = f'{ROOT}/models/best_model.pth'
+    model_ckpt_path = f'{BASE_DIR}/models/best_model.pth'
     kaggle_async_eval(
         epoch=1,
         model_ckpt_path=model_ckpt_path,

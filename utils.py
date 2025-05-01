@@ -9,6 +9,7 @@ import matplotlib.pyplot as plt
 from contextlib import contextmanager
 
 from model import UNetModel
+from config import BASE_DIR
 from _types import RadarSampleInputs
 
 
@@ -60,7 +61,7 @@ def evaluate_fspl(output_img, fspl):
 
 def matrix_to_image(*matrices, titles=None, save_path=None):
     n = abs(int(matrices[1].sum()))
-    save_path = save_path or f"/auto/home/xoren/icassp2025/foo/1_{n}.png"
+    save_path = save_path or f"{BASE_DIR}/foo/1_{n}.png"
     if len(matrices) < 2:
         raise ValueError("At least two matrices are required: 1 ground truth + 1 comparison.")
 
@@ -129,6 +130,7 @@ def check_tensor_device(tensor, name, expected_device='cpu'):
 
 
 def split_data_task1(inputs_list: List[RadarSampleInputs], val_ratio=0.25, split_save_path=None, seed=None):
+    # np.random.shuffle(inputs_list); inputs_list = inputs_list[:50] # TODO remove after debug
     building_ids = list(set([f.ids[0] for f in inputs_list]))
     np.random.seed(seed=seed)
     np.random.shuffle(building_ids)
