@@ -75,6 +75,9 @@ class PathlossPredictor:
         with torch.no_grad():
             preds = self.model(batch_tensor)  
 
+        if isinstance(preds, dict):
+            preds = preds["pred"] 
+
         results = []
         for i in range(len(input_samples)):
             pred_i = preds[i]  # shape ~ [C, H, W]

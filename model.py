@@ -1,77 +1,156 @@
+# model.py
 import torch
 import torch.nn as nn
-import segmentation_models_pytorch as smp
+import torch.nn.functional as F
+from segmentation_models_pytorch.encoders import get_encoder
+from segmentation_models_pytorch.decoders.unet.decoder import UnetDecoder
 
+# ------------------------------------------------------------------- helpers
+def sample_gumbel(shape, eps=1e-20, device=None):
+    u = torch.rand(shape, device=device)
+    return -torch.log(-torch.log(u + eps) + eps)
 
+def gumbel_topk_mask(logits_flat, k, tau=1.0, hard=False):
+    g = sample_gumbel(logits_flat.shape, device=logits_flat.device)
+    p = F.softmax((logits_flat + g) / tau, dim=1)
+    m_soft = k * p
+    if not hard:
+        return m_soft, None
+    topk_idx = m_soft.topk(k, dim=1).indices
+    m_hard = torch.zeros_like(m_soft).scatter_(1, topk_idx, 1.0)
+    return m_soft, m_hard
+
+# ------------------------------------------------------------------- ASPP
 class ASPPModule(nn.Module):
     def __init__(self, in_channels, out_channels):
-        super(ASPPModule, self).__init__()
-        
-        # 1x1 convolution
-        self.conv1 = nn.Conv2d(in_channels, out_channels, 1, bias=False)
-        self.bn1 = nn.BatchNorm2d(out_channels)
-        
-        # Dilated convolutions at different rates
-        self.conv2 = nn.Conv2d(in_channels, out_channels, 3, padding=6, dilation=6, bias=False)
-        self.bn2 = nn.BatchNorm2d(out_channels)
-        
-        self.conv3 = nn.Conv2d(in_channels, out_channels, 3, padding=12, dilation=12, bias=False)
-        self.bn3 = nn.BatchNorm2d(out_channels)
-        
-        self.conv4 = nn.Conv2d(in_channels, out_channels, 3, padding=18, dilation=18, bias=False)
-        self.bn4 = nn.BatchNorm2d(out_channels)
-        
-        # Global pooling branch
-        self.global_pool = nn.AdaptiveAvgPool2d(1)
-        self.conv5 = nn.Conv2d(in_channels, out_channels, 1, bias=False)
-        self.bn5 = nn.BatchNorm2d(out_channels)
-        
-        # Output projection
-        self.out_conv = nn.Conv2d(out_channels * 5, out_channels, 1, bias=False)
-        self.out_bn = nn.BatchNorm2d(out_channels)
+        super().__init__()
         self.relu = nn.ReLU(inplace=True)
-        
+
+        self.conv1 = nn.Sequential(
+            nn.Conv2d(in_channels, out_channels, 1, bias=False),
+            nn.BatchNorm2d(out_channels), self.relu)
+
+        self.conv2 = nn.Sequential(
+            nn.Conv2d(in_channels, out_channels, 3, padding=6, dilation=6, bias=False),
+            nn.BatchNorm2d(out_channels), self.relu)
+
+        self.conv3 = nn.Sequential(
+            nn.Conv2d(in_channels, out_channels, 3, padding=12, dilation=12, bias=False),
+            nn.BatchNorm2d(out_channels), self.relu)
+
+        self.conv4 = nn.Sequential(
+            nn.Conv2d(in_channels, out_channels, 3, padding=18, dilation=18, bias=False),
+            nn.BatchNorm2d(out_channels), self.relu)
+
+        self.global_pool = nn.AdaptiveAvgPool2d(1)
+        self.conv5 = nn.Sequential(
+            nn.Conv2d(in_channels, out_channels, 1, bias=False),
+            nn.BatchNorm2d(out_channels), self.relu)
+
+        self.out_proj = nn.Sequential(
+            nn.Conv2d(out_channels * 5, out_channels, 1, bias=False),
+            nn.BatchNorm2d(out_channels), self.relu)
+
     def forward(self, x):
-        size = x.size()
-        
-        # Process branches
-        out1 = self.relu(self.bn1(self.conv1(x)))
-        out2 = self.relu(self.bn2(self.conv2(x)))
-        out3 = self.relu(self.bn3(self.conv3(x)))
-        out4 = self.relu(self.bn4(self.conv4(x)))
-        
-        # Global pooling branch
+        size = x.size()[2:]
+        out1 = self.conv1(x)
+        out2 = self.conv2(x)
+        out3 = self.conv3(x)
+        out4 = self.conv4(x)
+
         out5 = self.global_pool(x)
-        out5 = self.relu(self.bn5(self.conv5(out5)))
-        out5 = nn.functional.interpolate(out5, size=size[2:], mode='bilinear', align_corners=True)
-        
-        # Concatenate and project
+        out5 = self.conv5(out5)
+        out5 = F.interpolate(out5, size=size, mode='bilinear', align_corners=True)
+
         out = torch.cat([out1, out2, out3, out4, out5], dim=1)
-        out = self.relu(self.out_bn(self.out_conv(out)))
-        
-        return out
+        return self.out_proj(out)
 
+# ------------------------------------------------------------------- network
+class PathLossNet(nn.Module):
+    """UNet completion + optional selector head (Gumbel-Top-k)."""
+    def __init__(self,
+                 in_channels: int = 4,
+                 use_selector: bool = True,
+                 k_frac: float    = 0.005,
+                 tau: float       = 0.7,
+                 extra_channels: int = 2,             # mask + sparse
+                 encoder_name: str  = "resnet18",
+                 decoder_channels   = (256,128,64,32,16)):
+        super().__init__()
+        self.use_selector = use_selector
+        self.k_frac = k_frac
+        self.tau    = tau
 
-class UNetModel(nn.Module):
-    def __init__(self, n_channels=6):
-        super(UNetModel, self).__init__()
-        
-        self.unet = smp.Unet(
-            encoder_name="resnet34",  # Changed from resnet34 to resnet34
-            in_channels=n_channels,
-            classes=1,
-            activation=None
-        )
-        
-        # resnet34 bottleneck still has 512 channels like resnet34,
-        # but the network is deeper with more layers
-        self.aspp = ASPPModule(in_channels=512, out_channels=512)
+        # -------- encoder --------------------------------------------------
+        self.encoder = get_encoder(encoder_name, in_channels=in_channels, weights=None)
+        enc_ch = list(self.encoder.out_channels)
 
-    def forward(self, x):
-        features = self.unet.encoder(x)
-        features[-1] = self.aspp(features[-1])
-        decoder_output = self.unet.decoder(*features)
-        logits = self.unet.segmentation_head(decoder_output)
-        
-        output = logits.squeeze(1)
-        return output
+        # -------- ASPP on bottleneck --------------------------------------
+        self.aspp = ASPPModule(enc_ch[-1], enc_ch[-1])
+
+        # -------- selector head -------------------------------------------
+        if use_selector:
+            self.selector_head = nn.Conv2d(enc_ch[-1], 1, 1)
+
+        # -------- completion decoder --------------------------------------
+        enc_ch[0] += extra_channels
+        self.decoder = UnetDecoder(
+            encoder_channels = enc_ch,
+            decoder_channels = decoder_channels,
+            n_blocks         = len(decoder_channels),
+            use_batchnorm    = True)
+        self.seg_head = nn.Conv2d(decoder_channels[-1], 1, 1)
+
+    # ------------------------------------------------------------------- fwd
+    def forward(self,
+                x,                  # (B,C,H,W)
+                y_full     = None,
+                ext_mask   = None,
+                ext_sparse = None,
+                tau        = None,
+                hard: bool = True):
+        B, _, H, W = x.shape
+        tau = tau or self.tau
+
+        # -------- encoder + ASPP
+        feats = self.encoder(x)
+        feats[-1] = self.aspp(feats[-1])     # enrich bottleneck
+
+        # -------- selector branch
+        if self.use_selector:
+            logits = self.selector_head(F.interpolate(feats[-1],
+                                                      size=(H, W),
+                                                      mode='bilinear',
+                                                      align_corners=False))
+            logits_flat = logits.flatten(2).transpose(1, 2)
+            k = max(1, int(self.k_frac * H * W))
+            m_soft, m_hard = gumbel_topk_mask(logits_flat, k, tau, hard)
+            m_soft = m_soft.view(B, 1, H, W)
+            m_hard = m_hard.view(B, 1, H, W) if m_hard is not None else None
+
+            if self.training:
+                if y_full is None:
+                    raise ValueError("y_full required when training with selector.")
+                y_sparse = (y_full * m_hard) if hard else (y_full * m_soft)
+            else:
+                y_sparse = torch.zeros_like(m_soft)
+        else:
+            if ext_mask is None or ext_sparse is None:
+                raise ValueError("Provide ext_mask & ext_sparse when selector disabled.")
+            m_soft, y_sparse = ext_mask, ext_sparse
+            logits = m_hard = None
+
+        # -------- inject mask + sparse into first skip
+        feats[0] = torch.cat([feats[0], m_soft, y_sparse], dim=1)
+
+        # -------- decode & predict
+        dec  = self.decoder(*feats)
+        pred = self.seg_head(dec).squeeze(1)
+
+        return {
+            "pred": pred,
+            "logits": logits,
+            "mask_soft": m_soft,
+            "mask_hard": m_hard,
+            "sparse": y_sparse
+        }

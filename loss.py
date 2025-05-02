@@ -180,6 +180,31 @@ def create_sip2net_loss(use_mse=True, mse_weight=0.5, alpha1=500, alpha2=1, alph
     )
 
 
+# loss.py  (add this tiny helper, keep your SIP2Net etc.)
+import torch.nn.functional as F
+
+def entropy(p):
+    # p already sums to 1 along dim=1
+    return -(p * (p + 1e-12).log()).sum(dim=1).mean()
+
+class PathLossCriterion(nn.Module):
+    def __init__(self, sip2net_loss, entropy_weight=1e-4, mse_only=False):
+        super().__init__()
+        self.sip = sip2net_loss        # your big combined loss
+        self.entropy_w = entropy_weight
+        self.mse_only = mse_only
+
+    def forward(self, batch_out, y_true):
+        pred = batch_out["pred"]
+        loss = F.mse_loss(pred, y_true) if self.mse_only else self.sip(pred, y_true)[0]
+
+        # selector regulariser (if present)
+        if batch_out["logits"] is not None:
+            p = batch_out["mask_soft"].flatten(1)
+            loss += self.entropy_w * entropy(p / p.sum(dim=1, keepdim=True))
+        return loss
+
+
 
 if __name__ == "__main__":
     print("Testing SIP2Net Loss...")

@@ -1,113 +1,121 @@
-import os
-import gc
-import torch
-import numpy as np
-from time import time
+# train.py   (drop-in replacement)
+
+import torchvision
 from tqdm import tqdm
-from torchvision.io import read_image
-from torch.amp import autocast, GradScaler
+import os, gc, time, torch, numpy as np
+from torch.cuda.amp import autocast, GradScaler
 
+from model import PathLossNet
+from loss  import PathLossCriterion, create_sip2net_loss
 from inference import PathlossPredictor
-from loss import se, create_sip2net_loss
 from kaggle_eval import kaggle_async_eval
+from loss import se                       # still used for on-the-fly MSE
 
-
-def evaluate_model(inference_model, val_samples, batch_size=8):
+# ---------------------------------------------------- validation ----------
+@torch.no_grad()
+def evaluate_model(inference_model, val_samples, batch_size=8, device="cuda"):
     preds_list, targets_list = [], []
     val_samples = list(val_samples)
 
     all_inputs, all_targets = [], []
     for sample in val_samples:
         d = sample.asdict()
-        target = read_image(d.pop("output_file")).float()
+        target = torchvision.io.read_image(d.pop("output_file")).float()
         all_inputs.append(d)
         all_targets.append(target)
 
-    with torch.no_grad():
-        for start_idx in tqdm(range(0, len(all_inputs), batch_size), desc="Evaluating validation set"):
-            end_idx = start_idx + batch_size
-            batch_inputs = all_inputs[start_idx:end_idx]
-            batch_targets = all_targets[start_idx:end_idx]
+    for i in tqdm(range(0, len(all_inputs), batch_size), desc="Validating"):
+        batch_in  = all_inputs [i : i + batch_size]
+        batch_tgt = all_targets[i : i + batch_size]
 
-            batch_preds = inference_model.predict(batch_inputs)
-            for pred_i, target_i in zip(batch_preds, batch_targets):
-                preds_list.extend(pred_i.cpu().numpy().ravel())
-                targets_list.extend(target_i.cpu().numpy().ravel())
+        batch_pred = inference_model.predict(batch_in)
+        for p, t in zip(batch_pred, batch_tgt):
+            preds_list  .extend(p.cpu().numpy().ravel())
+            targets_list.extend(t.cpu().numpy().ravel())
 
-    preds_np = np.array(preds_list)
-    targets_np = np.array(targets_list)
-    val_rmse = np.sqrt(np.mean((np.square(preds_np - targets_np))))
+    preds_np   = np.asarray(preds_list)
+    targets_np = np.asarray(targets_list)
+    return np.sqrt(np.mean((preds_np - targets_np) ** 2))
 
-    return val_rmse
 
-# def evaluate_model(inference_model, val_samples, batch_size=8):
-#     return 1 / time()
+# -------------------------------------------------------- training -------
+def train_model(
+    model_cfg         : dict,              # kwargs for PathLossNet
+    train_loader,
+    val_samples,
+    optimizer,
+    scheduler,
+    num_epochs,
+    save_dir,
+    logger,
+    device            = "cuda",
+    criterion_mode    = "mse",             # "mse" or "sip"
+    entropy_weight    = 1e-4):
 
-def train_model(model, train_loader, val_samples, optimizer, scheduler, num_epochs, save_dir, logger, device=None, use_sip2net=False, sip2net_params={}):
     os.makedirs(save_dir, exist_ok=True)
-    model.to(device)
-    best_loss = float('inf')
+    net = PathLossNet(**model_cfg).to(device)
+
+    # ---- loss -----------------------------------------------------------
+    if criterion_mode == "sip":
+        sip = create_sip2net_loss(use_mse=True, mse_weight=0.5)
+        criterion = PathLossCriterion(sip2net_loss=sip,
+                                      entropy_weight=entropy_weight)
+    else:
+        criterion = PathLossCriterion(sip2net_loss=None, mse_only=True)
+
     scaler = GradScaler(enabled=True)
-    inference_model = PathlossPredictor(model=model)
-    
-    # Setup SIP2Net loss if requested
-    if use_sip2net:
-        print(f"Using SIP2Net loss")
-        sip2net_criterion = create_sip2net_loss(use_mse=True, **sip2net_params)
+    best_loss = float('inf')
 
-    for epoch in range(num_epochs):
-        print(f'Epoch {epoch+1}/{num_epochs}\n{"-"*10}')
-        model.train()
+    # wrapper for submission-time inference (unchanged)
+    inference_model = PathlossPredictor(model=net)
 
-        for batch_idx, (inputs, targets, masks) in enumerate(tqdm(train_loader), start=1):
-            inputs = inputs.to(device)
-            targets = targets.to(device)
-            masks = masks.to(device)
+    for epoch in range(1, num_epochs + 1):
+        print(f"\nEpoch {epoch}/{num_epochs}")
+        net.train()
 
-            optimizer.zero_grad()
-            with autocast('cuda'):
-                preds = model(inputs)
+        for inputs, targets, masks in tqdm(train_loader, desc="Train"):
+            inputs, targets, masks = (t.to(device) for t in (inputs, targets, masks))
 
-                mask_sum = masks.sum()
-                batch_se = se(preds, targets, masks)
-                batch_mse = batch_se / masks.sum()
-                
-                # Use SIP2Net loss if requested
-                if use_sip2net:
-                    loss, _ = sip2net_criterion(preds, targets, masks)
-                else:
-                    loss = batch_mse
+            # --- choose mode -------------------------------------------
+            if net.use_selector:
+                fwd_kwargs = dict(y_full=targets)           # probes are learned
+            else:
+                sparse = targets * masks
+                fwd_kwargs = dict(ext_mask=masks, ext_sparse=sparse)
+
+            optimizer.zero_grad(set_to_none=True)
+            with autocast():
+                out   = net(inputs, **fwd_kwargs)
+                loss  = criterion(out, targets)
 
             scaler.scale(loss).backward()
             scaler.step(optimizer)
             scaler.update()
 
-            logger.log_batch_loss(batch_se.item(), mask_sum.item())
+            # simple logging: raw SE and mask sum (unchanged)
+            batch_se  = se(out["pred"], targets, masks).item()
+            logger.log_batch_loss(batch_se, masks.sum().item())
 
-            del inputs, targets, masks, preds, batch_se, batch_mse, loss, mask_sum
+            del inputs, targets, masks, out, loss
 
-        t0 = time()
+        # ---------------- validation -----------------------------------
+        t0 = time.time()
+        inference_model.model = net          # sync wrapper
+        val_rmse = evaluate_model(inference_model, val_samples,
+                                  batch_size=8, device=device)
+        print(f"Validation RMSE: {val_rmse:.4f}  (took {time.time()-t0:.1f}s)")
 
-        inference_model.model = model
-        inference_model.model.to(device)
-        val_loss = evaluate_model(inference_model=inference_model, val_samples=val_samples, batch_size=8)
-        print(f"Validation RMSE: {val_loss} taking {time() - t0}")
+        scheduler.step(val_rmse)
+        logger.log_epoch_loss(val_rmse, epoch, optimizer.param_groups[0]['lr'])
 
-        current_lr = optimizer.param_groups[0]['lr']
-        scheduler.step(val_loss)
-        logger.log_epoch_loss(val_loss, epoch, current_lr)
+        # kaggle_async_eval(epoch=epoch, logger=logger, model=inference_model)
 
-        kaggle_async_eval(
-            epoch=epoch,
-            logger=logger,
-            model=inference_model,
-        )
-
-        if val_loss is not None and val_loss < best_loss:
-            best_loss = val_loss
-            torch.save(model.state_dict(), os.path.join(save_dir, 'best_model.pth'))
-            print(f'Saved new best model (Val RMSE: {val_loss:.4f}).')
+        # save checkpoints
+        if val_rmse < best_loss:
+            best_loss = val_rmse
+            torch.save(net.state_dict(), os.path.join(save_dir, 'best_model.pth'))
+            print("✓ saved new best")
         if epoch % 5 == 0:
-            torch.save(model.state_dict(), os.path.join(save_dir, f'epoch_{epoch}.pth'))
+            torch.save(net.state_dict(), os.path.join(save_dir, f'epoch_{epoch}.pth'))
 
         gc.collect()

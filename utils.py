@@ -8,7 +8,7 @@ from typing import List
 import matplotlib.pyplot as plt
 from contextlib import contextmanager
 
-from model import UNetModel
+from model import PathLossNet
 from config import BASE_DIR
 from _types import RadarSampleInputs
 
@@ -103,7 +103,7 @@ def matrix_to_image(*matrices, titles=None, save_path=None):
     return diffs
 
 def load_model(weights_path=None, device=None):    
-    model = UNetModel()
+    model = PathLossNet()
     if not os.path.isfile(weights_path):
         raise ValueError(f"Model weights_path {weights_path} doesn't exist.")
     
