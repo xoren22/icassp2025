@@ -8,6 +8,7 @@ from typing import List
 import matplotlib.pyplot as plt
 from contextlib import contextmanager
 
+from config import BASE_DIR
 from model import UNetModel
 from _types import RadarSampleInputs
 
@@ -60,7 +61,7 @@ def evaluate_fspl(output_img, fspl):
 
 def matrix_to_image(*matrices, titles=None, save_path=None):
     n = abs(int(matrices[1].sum()))
-    save_path = save_path or f"/auto/home/xoren/icassp2025/foo/1_{n}.png"
+    save_path = save_path or f"{BASE_DIR}/icassp2025/foo/1_{n}.png"
     if len(matrices) < 2:
         raise ValueError("At least two matrices are required: 1 ground truth + 1 comparison.")
 

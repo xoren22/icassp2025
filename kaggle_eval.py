@@ -5,6 +5,7 @@ import pandas as pd
 from tqdm import tqdm
 from kaggle.api.kaggle_api_extended import KaggleApi
 
+from config import BASE_DIR
 from inference import PathlossPredictor
 
 def _generate_solution_df(model: PathlossPredictor, verbose=False, batch_size=8) -> pd.DataFrame:
@@ -15,17 +16,17 @@ def _generate_solution_df(model: PathlossPredictor, verbose=False, batch_size=8)
     """
     # 1) Gather all sample dictionaries.
     samples = []
-    for f_i in [1, 2]:
-        freq_mhz = 868 if f_i == 1 else 2400
+    for f_i in [1]:
+        freq_mhz = 868
         for b in [1, 5]:
             for sp in range(25):
                 sample_id_prefix = f"B{b}_Ant1_f{f_i}_S{sp}_"
                 samples.append({
                     'freq_MHz': freq_mhz,
                     'sampling_position': sp,
-                    'input_file': f"/auto/home/xoren/icassp2025/data/kaggle/Evaluation_Data_T2/Inputs/Task_2/B{b}_Ant1_f{f_i}_S{sp}.png",
-                    'position_file': f"/auto/home/xoren/icassp2025/data/kaggle/Evaluation_Data_T2/Positions/Positions_B{b}_Ant1_f{f_i}.csv",
-                    'radiation_pattern_file': '/auto/home/xoren/icassp2025/data/kaggle/Evaluation_Data_T2/Radiation_Patterns/Ant1_Pattern.csv',
+                    'input_file': f"{BASE_DIR}/data/kaggle/Evaluation_Data_T1/Inputs/Task_1/B{b}_Ant1_f{f_i}_S{sp}.png",
+                    'position_file': f"{BASE_DIR}/data/kaggle/Evaluation_Data_T1/Positions/Positions_B{b}_Ant1_f{f_i}.csv",
+                    'radiation_pattern_file': f'{BASE_DIR}/data/kaggle/Evaluation_Data_T1/Radiation_Patterns/Ant1_Pattern.csv',
                     # We'll store the ID prefix for generating row labels later
                     'id_prefix': sample_id_prefix
                 })
@@ -91,8 +92,8 @@ def _kaggle_eval_thread_fn(
     epoch: int,
     model,
     logger,
-    csv_save_path: str = "/auto/home/xoren/Task2.csv",
-    competition: str = "indoor-pathloss-radio-map-prediction-task-2",
+    csv_save_path: str = f"{BASE_DIR}/Task1.csv",
+    competition: str = 'iprm-task-1',
     submission_message: str = "My auto submission",
 ):
     solution_df = _generate_solution_df(model)
@@ -115,8 +116,8 @@ def kaggle_async_eval(
     model_ckpt_path=None,
     model=None,
     logger=None,
-    csv_save_path: str = "/auto/home/xoren/Task2.csv",
-    competition: str = "indoor-pathloss-radio-map-prediction-task-2",
+    csv_save_path: str = f"{BASE_DIR}/Task1.csv",
+    competition: str = 'iprm-task-1',
     submission_message: str = "My auto submission",
 ):
     model = model or PathlossPredictor(model_ckpt_path=model_ckpt_path)
@@ -130,7 +131,7 @@ def kaggle_async_eval(
 
 
 if __name__ == "__main__":
-    model_ckpt_path = '/auto/home/xoren/icassp2025/models/best_model.pth'
+    model_ckpt_path = f'{BASE_DIR}/models/best_model.pth'
     kaggle_async_eval(
         epoch=1,
         model_ckpt_path=model_ckpt_path,

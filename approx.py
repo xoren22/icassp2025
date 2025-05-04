@@ -11,6 +11,7 @@ from kaggle_eval import kaggle_async_eval
 from dataclasses import dataclass, asdict
 from typing import Union, Tuple, Optional, List
 
+
 @dataclass
 class RadarSample:
     H: int
@@ -280,10 +281,12 @@ class Approx:
 
         return predictions
 
+BASE_DIR = os.path.dirname(__file__)
 
 kaggle_async_eval(
     epoch=1,
     model=Approx(),
-    csv_save_path="/Users/xoren/Desktop/Task2.csv",
-    submission_message="Approx."
+    csv_save_path=f"{BASE_DIR}/../Desktop/Task1.csv",
+    submission_message="Preds",
+    competition='iprm-task-1',
 )
