@@ -55,7 +55,7 @@ class RadarSampleInputs:
         if not isinstance(self.freq_MHz, (int, float)):
             raise ValueError("freq_MHz must be a number")
         
-        for path_attr in ['input_file', 'output_file', 'position_file', 'radiation_pattern_file']:
+        for path_attr in ['input_file', 'position_file', 'radiation_pattern_file']:
             path = getattr(self, path_attr)
             if not os.path.exists(path):
                 raise FileNotFoundError(f"File not found: {path}")
