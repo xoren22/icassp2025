@@ -252,7 +252,6 @@ def calculate_fspl(
     FSPL(dB) = 20 log10(dist) + 20 log10(freq) - 27.55, minus antenna_gain.
     """
     dist_clamped = torch.clamp(dist_m, min=min_dist_m)
-    freq_tensor = torch.tensor(freq_MHz, dtype=torch.float32)
     fspl_db = 20.0 * dist_clamped.log10() + 20.0 * math.log10(freq_MHz) - 27.55
 
     return fspl_db - antenna_gain
