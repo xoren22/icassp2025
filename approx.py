@@ -147,11 +147,14 @@ def _calculate_transmittance_loss_numpy(
             px = int(round(x))
             py = int(round(y))
 
-            # Out of bounds => optionally add last_val, then break
             if px < 0 or px >= w or py < 0 or py >= h:
-                if last_val is not None and last_val > 0:
+                # antenna still outside → step forward until we hit the map
+                if last_val is None:
+                    r += radial_step
+                    continue
+                # already inside → leave as before
+                if last_val > 0:
                     sum_loss += last_val
-                    # Check for 160 limit
                     if sum_loss > 160:
                         sum_loss = 160
                 break
