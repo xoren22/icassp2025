@@ -123,8 +123,8 @@ def _calculate_transmittance_loss_numpy(
     to sum_loss. If sum_loss exceeds 160, we clip to 160 and stop the ray.
     """
     h, w = transmittance_matrix.shape
-    output = np.zeros((h, w), dtype=transmittance_matrix.dtype)
-    counts = np.zeros((h, w), dtype=np.float32)
+    output  = np.zeros((h, w), dtype=np.float32)
+    counts  = np.zeros((h, w), dtype=np.float32)
 
     dtheta = 2.0 * np.pi / n_angles
     max_dist = np.sqrt(w*w + h*h)
@@ -134,8 +134,8 @@ def _calculate_transmittance_loss_numpy(
     for i in range(int(n_angles)):
         cos_t = cos_vals[i]
         sin_t = sin_vals[i]
-        sum_loss = 0.0
-        last_val = None
+        sum_loss  = 0.0
+        last_val  = None
         wall_count = 0
         r = 0.0
 
@@ -145,6 +145,7 @@ def _calculate_transmittance_loss_numpy(
 
             px = int(round(x))
             py = int(round(y))
+
             # Out of bounds => optionally add last_val, then break
             if px < 0 or px >= w or py < 0 or py >= h:
                 if last_val is not None and last_val > 0:
@@ -184,8 +185,7 @@ def _calculate_transmittance_loss_numpy(
                             else:
                                 old_val = output[py_temp, px_temp]
                                 old_count = counts[py_temp, px_temp]
-                                new_val = (old_val*old_count + sum_loss)/(old_count+1)
-                                output[py_temp, px_temp] = new_val
+                                output[py_temp, px_temp] = (old_val*old_count + sum_loss) / (old_count+1)
                                 counts[py_temp, px_temp] += 1
                             r_temp += radial_step
                         break
@@ -198,17 +198,13 @@ def _calculate_transmittance_loss_numpy(
             else:
                 old_val = output[py, px]
                 old_count = counts[py, px]
-                new_val = (old_val*old_count + sum_loss)/(old_count+1)
-                output[py, px] = new_val
+                output[py, px] = (old_val*old_count + sum_loss) / (old_count+1)
                 counts[py, px] += 1
 
-            # If we've hit max walls, stop
-            if wall_count >= max_walls:
-                break
-
-            # Finally, if sum_loss has grown above 160 at any point, clip & stop
-            if sum_loss > 160:
-                sum_loss = 160
+            if wall_count >= max_walls or sum_loss > 160:
+                # Check for 160 limit
+                if sum_loss > 160:
+                    sum_loss = 160
                 break
 
             r += radial_step
@@ -223,11 +219,13 @@ def calculate_transmittance_loss(
     radial_step=1.0,
     max_walls=10
 ) -> torch.Tensor:
-    trans_np = transmittance_matrix.cpu().numpy()
+    trans_np = transmittance_matrix.cpu().numpy().astype(np.float32)
     output_np = _calculate_transmittance_loss_numpy(
         trans_np, x_ant, y_ant, n_angles, radial_step, max_walls
     )
-    np.clip(output_np, 0.0, 160.0)
+
+    np.clip(output_np, 0.0, 160.0, out=output_np)
+
     return torch.from_numpy(output_np)
 
 def calculate_distance(x_ant, y_ant, H, W, pixel_size):
