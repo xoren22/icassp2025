@@ -1,6 +1,7 @@
 # approx.py
 
 import os
+import math
 import torch
 import numpy as np
 import pandas as pd
@@ -252,7 +253,8 @@ def calculate_fspl(
     """
     dist_clamped = torch.clamp(dist_m, min=min_dist_m)
     freq_tensor = torch.tensor(freq_MHz, dtype=torch.float32)
-    fspl_db = 20.0 * torch.log10(dist_clamped) + 20.0 * torch.log10(freq_tensor) - 27.55
+    fspl_db = 20.0 * dist_clamped.log10() + 20.0 * math.log10(freq_MHz) - 27.55
+
     return fspl_db - antenna_gain
 
 
