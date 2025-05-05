@@ -261,7 +261,9 @@ class Approx:
         trans = sample.input_img[1]  # second channel = transmittance
         dist = calculate_distance(sample.x_ant[0], sample.y_ant[0], sample.H, sample.W, sample.pixel_size)
         trans_loss = calculate_transmittance_loss(trans, sample.x_ant[0], sample.y_ant[0])
-        trans_loss_smooth = torch.from_numpy(gaussian_filter(trans_loss.numpy(), sigma=5.0, mode='reflect'))
+
+        sigma_px = 5.0 * (0.25 / sample.pixel_size)
+        trans_loss_smooth = torch.from_numpy(gaussian_filter(trans_loss.numpy(), sigma=sigma_px, mode='reflect'))
 
         fspl = calculate_fspl(
             dist_m=dist,
@@ -269,7 +271,7 @@ class Approx:
             antenna_gain=torch.zeros_like(dist)
         )
         approx = trans_loss_smooth + fspl
-        approx = torch.round(approx-0.5)
+        approx = torch.floor(approx)          # round down
 
         return approx
     
