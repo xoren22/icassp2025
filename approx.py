@@ -273,6 +273,7 @@ class Approx:
         )
         approx = trans_loss_smooth + fspl
         approx = torch.floor(approx)          # round down
+        approx = torch.clamp(approx, max=160.0)   # global clip
 
         return approx
     
