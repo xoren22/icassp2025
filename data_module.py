@@ -17,15 +17,17 @@ def read_sample(inputs: Union[RadarSampleInputs, dict]):
     if isinstance(inputs, RadarSampleInputs):
         inputs = inputs.asdict()
 
+    ids = inputs["ids"]
     freq_MHz = inputs["freq_MHz"]
     input_file = inputs["input_file"]
     output_file = inputs.get("output_file")
     position_file = inputs["position_file"]
     sampling_position = inputs["sampling_position"]
-    radiation_pattern_file = inputs["radiation_pattern_file"]
     
     input_img = read_image(input_file).float()
     C, H, W = input_img.shape
+    reflectance = input_img[0]
+    transmittance = input_img[1]
     
     output_img = None
     if output_file:
@@ -34,23 +36,25 @@ def read_sample(inputs: Union[RadarSampleInputs, dict]):
             output_img = output_img.squeeze(0)
         
     sampling_positions = pd.read_csv(position_file)
-    x_ant, y_ant, azimuth = sampling_positions.loc[int(sampling_position), ["Y", "X", "Azimuth"]]
-    
-    radiation_pattern_np = np.genfromtxt(radiation_pattern_file, delimiter=',')
-    radiation_pattern = torch.from_numpy(radiation_pattern_np).float()
+    x_ant, y_ant = sampling_positions.loc[int(sampling_position), ["Y", "X"]]
 
+    if x_ant < 0 or x_ant >= W or y_ant < 0 or y_ant >= H:
+        b, ant, f, sp = ids
+        print(f"Antenna out of the bouds for B{b}_Ant{ant}_f{f}_S{sp}.png -- Skipping")
+        return
+    
     sample = RadarSample(
         H=H,
         W=W,
+        ids=ids,
         x_ant=x_ant,
         y_ant=y_ant,
-        azimuth=azimuth,
         freq_MHz=freq_MHz,
-        input_img=input_img,
+        reflectance=reflectance,
+        transmittance=transmittance,
         output_img=output_img,
         pixel_size=INITIAL_PIXEL_SIZE,
         mask=torch.ones((H, W)),
-        radiation_pattern=radiation_pattern,
     )
     
     return sample
@@ -74,9 +78,9 @@ class PathlossDataset(Dataset):
     def _preprocess_samples(self, inputs_list):
         samples = []
         for inp in tqdm(inputs_list, "Preprocessing samples: "):
-            sample = read_sample(inp)
-            sample = normalize_size(sample=sample, target_size=self.target_size)
-            samples.append(sample)
+            if sample := read_sample(inp):
+                sample = normalize_size(sample=sample, target_size=self.target_size)
+                samples.append(sample)
         return samples    
 
 

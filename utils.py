@@ -192,8 +192,8 @@ def plot_before_after(matrix_before, matrix_after, figsize=(12, 5)):
 
 def calculate_distance(x_ant, y_ant, H, W, pixel_size):
     y_grid, x_grid = torch.meshgrid(
-        torch.arange(H, dtype=torch.float32, device=torch.device('cpu')),
-        torch.arange(W, dtype=torch.float32, device=torch.device('cpu')),
+        torch.arange(H, dtype=torch.float32),
+        torch.arange(W, dtype=torch.float32),
         indexing='ij'
     )
     return torch.sqrt((x_grid - x_ant)**2 + (y_grid - y_ant)**2) * pixel_size

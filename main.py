@@ -15,10 +15,10 @@ from augmentations import AugmentationPipeline, GeometricAugmentation
 def main():
     parser = argparse.ArgumentParser(description='Train and evaluate pathloss prediction model')
 
-    parser.add_argument('--num_workers', type=int, default=6, help='number of workers')
+    parser.add_argument('--num_workers', type=int, default=0, help='number of workers')
     
     parser.add_argument('--gpu', type=int, default=None, help='GPU ID to use (default: auto-seleqct)')
-    parser.add_argument('--batch_size', type=int, default=8, help='Batch size for training')
+    parser.add_argument('--batch_size', type=int, default=2, help='Batch size for training')
     parser.add_argument('--epochs', type=int, default=2000, help='Number of epochs to train')
     parser.add_argument('--lr', type=float, default=3e-4, help='Learning rate')
     parser.add_argument('--data_dir', type=str, default='data/train/', help='Data directory')
@@ -41,7 +41,6 @@ def main():
     INPUT_PATH = os.path.join(DATA_DIR, f"Inputs/Task_2_ICASSP/")
     OUTPUT_PATH = os.path.join(DATA_DIR, f"Outputs/Task_2_ICASSP/")
     POSITIONS_PATH = os.path.join(DATA_DIR, "Positions/")
-    RADIATION_PATTERNS_PATH = os.path.join(DATA_DIR, "Radiation_Patterns/")
     MODEL_SAVE_PATH = os.path.join(BASE_DIR, args.model_dir)
     
     inputs_list = []
@@ -57,7 +56,6 @@ def main():
                        os.path.exists(os.path.join(OUTPUT_PATH, output_file)):
                         input_file = f"B{b}_Ant{ant}_f{f}_S{sp}.png"
                         output_file = f"B{b}_Ant{ant}_f{f}_S{sp}.png"
-                        radiation_file = f"Ant{ant}_Pattern.csv"
                         position_file = f"Positions_B{b}_Ant{ant}_f{f}.csv"
 
                         freq_MHz = freqs_MHz[f-1]
@@ -65,14 +63,11 @@ def main():
                         output_img_path = os.path.join(OUTPUT_PATH, output_file)
                         positions_path = os.path.join(POSITIONS_PATH, position_file)
                         
-                        radiation_pattern_file = os.path.join(RADIATION_PATTERNS_PATH, radiation_file)
-
                         radar_sample_inputs = RadarSampleInputs(
                             freq_MHz=freq_MHz,
                             input_file=input_img_path,
                             output_file=output_img_path,
                             position_file=positions_path,
-                            radiation_pattern_file=radiation_pattern_file,
                             sampling_position=sp,
                             ids=(b, ant, f, sp),
                         )

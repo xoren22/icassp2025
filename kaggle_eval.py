@@ -26,7 +26,6 @@ def _generate_solution_df(model: PathlossPredictor, verbose=False, batch_size=8)
                     'sampling_position': sp,
                     'input_file': f"{BASE_DIR}/data/kaggle/Evaluation_Data_T1/Inputs/Task_1/B{b}_Ant1_f{f_i}_S{sp}.png",
                     'position_file': f"{BASE_DIR}/data/kaggle/Evaluation_Data_T1/Positions/Positions_B{b}_Ant1_f{f_i}.csv",
-                    'radiation_pattern_file': f'{BASE_DIR}/data/kaggle/Evaluation_Data_T1/Radiation_Patterns/Ant1_Pattern.csv',
                     # We'll store the ID prefix for generating row labels later
                     'id_prefix': sample_id_prefix
                 })

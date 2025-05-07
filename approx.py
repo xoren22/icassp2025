@@ -83,8 +83,8 @@ def read_sample(inputs: Union[RadarSampleInputs, dict]):
     
     input_img = read_image(input_file).float()
     C, H, W = input_img.shape
-    reflectance = input_img[0]
-    transmittance = input_img[1]
+    reflectance = input_img[0:1]
+    transmittance = input_img[1:2]
     
     output_img = None
     if output_file:

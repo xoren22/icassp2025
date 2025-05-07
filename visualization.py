@@ -28,9 +28,9 @@ def visualize_results(results, save_dir='plots/'):
     
     # Plot input channels
     fig, axes = plt.subplots(1, 4, figsize=(16, 4))
-    channel_names = ['Reflectance', 'Transmittance', 'Distance', 'Radiation Pattern']
+    channel_names = ['Reflectance', 'Transmittance', 'Distance']
     
-    for i in range(4):
+    for i in range(3):
         im = axes[i].imshow(inputs[i], cmap='viridis')
         axes[i].set_title(channel_names[i])
         plt.colorbar(im, ax=axes[i])
