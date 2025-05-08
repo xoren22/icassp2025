@@ -144,7 +144,7 @@ def split_data_task1(inputs_list: List[RadarSampleInputs], val_ratio=0.25, split
     train_buildings = building_ids[n_buildings_valid:]
 
     val_inputs, train_inputs = [], []
-    for f in inputs_list:
+    for f in inputs_list[:100]: # TODO fix after debug to 360*128
         if f.ids[0] in val_buildings:
             val_inputs.append(f)
         else:
@@ -190,11 +190,14 @@ def plot_before_after(matrix_before, matrix_after, figsize=(12, 5)):
     plt.tight_layout()
     return fig, axes
 
-def calculate_distance(x_ant, y_ant, H, W, pixel_size):
+def calculate_distance(x_ant, y_ant, H, W, pixel_size, min_dist_m=0.125):
     y_grid, x_grid = torch.meshgrid(
         torch.arange(H, dtype=torch.float32),
         torch.arange(W, dtype=torch.float32),
         indexing='ij'
     )
-    return torch.sqrt((x_grid - x_ant)**2 + (y_grid - y_ant)**2) * pixel_size
+        
+    dist_m = torch.sqrt((x_grid - x_ant)**2 + (y_grid - y_ant)**2) * pixel_size
+    dist_clamped = torch.clamp(dist_m, min=min_dist_m)
 
+    return dist_clamped

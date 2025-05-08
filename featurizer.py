@@ -76,7 +76,6 @@ def _calculate_transmittance_loss_numpy(transmittance_matrix, x_ant, y_ant, n_an
 
     return output
 
-
 def calculate_transmittance_loss(transmittance_matrix, x_ant, y_ant, n_angles=360*128, radial_step=1.0, max_walls=10, smooth=True):
     transmittance_np = transmittance_matrix.cpu().numpy()
     output_np = _calculate_transmittance_loss_numpy(transmittance_np, x_ant, y_ant, n_angles, radial_step, max_walls)
@@ -88,11 +87,9 @@ def calculate_transmittance_loss(transmittance_matrix, x_ant, y_ant, n_angles=36
 def calculate_fspl(
     dist_m,               # distance in meters (torch tensor)
     freq_MHz,             # frequency in MHz
-    min_dist_m=0.125,     # clamp distance below this
 ):
-    dist_clamped = torch.clamp(dist_m, min=min_dist_m)
     freq_tensor = torch.tensor(freq_MHz, device=torch.device('cpu'))
-    fspl_db = 20.0 * torch.log10(dist_clamped) + 20.0 * torch.log10(freq_tensor) - 27.55
+    fspl_db = 20.0 * torch.log10(dist_m) + 20.0 * torch.log10(freq_tensor) - 27.55
     
     return fspl_db
 
@@ -142,10 +139,8 @@ def featurize_inputs(sample: RadarSample) -> torch.Tensor:
     input_tensor[3] = torch.full((sample.H, sample.W), sample.freq_MHz, dtype=torch.float32, device=torch.device('cpu'))
     input_tensor[4] = free_space_pathloss
     input_tensor[5] = transmittance_loss
-
+    input_tensor[6] = sample.mask
+    
     input_tensor = normalize_input(input_tensor)
 
-    mask = sample.mask
-    input_tensor[6] = mask
-    
     return input_tensor

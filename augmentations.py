@@ -1,5 +1,6 @@
-import random
+import math
 import torch
+import random
 import numpy as np
 from typing import List, Optional, Tuple
 import torchvision.transforms.functional as TF
@@ -73,8 +74,9 @@ def normalize_size(sample: RadarSample, target_size) -> RadarSample:
         sample.output_img = padded_output
     
     sample.H = sample.W = target_size
+    resized_mask = resize_nearest(sample.mask, new_size)
     sample.mask = torch.zeros((target_size, target_size), dtype=torch.float32, device=torch.device('cpu'))
-    sample.mask[:new_h, :new_w] = resize_nearest(sample.mask, new_size)
+    sample.mask[:new_h, :new_w] = resized_mask
     
     return sample
 
@@ -105,7 +107,7 @@ class GeometricAugmentation(BaseAugmentation):
     
     def _apply_distance_scaling(self, sample: RadarSample, scale_factor: float) -> RadarSample:
         sample.pixel_size *= scale_factor
-        sample.output_img += 20.0 * np.log10(scale_factor)
+        sample.output_img += 20.0 * math.log10(scale_factor)
         
         return sample
     
