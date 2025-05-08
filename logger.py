@@ -34,10 +34,10 @@ class TrainingLogger:
 
         # Use add_scalars so both series appear on the same chart
         self.writer.add_scalars(
-            "epoch_rmse",
+            "epoch_mse",
             {
-                "training": epoch_training_loss,
-                "validation": val_epoch_loss
+                "training": epoch_training_loss**2,
+                "validation": val_epoch_loss**2,
             },
             epoch
         )
@@ -47,9 +47,9 @@ class TrainingLogger:
     
     def log_kaggle_eval(self, kaggle_score, epoch):
         self.writer.add_scalars(
-            "epoch_rmse",
+            "epoch_mse",
             {
-                "kaggle": kaggle_score**0.5, # kaggle scores are in mse, we need rmse
+                "kaggle": kaggle_score, # kaggle scores are in mse, we need rmse
             },
             epoch
         )
