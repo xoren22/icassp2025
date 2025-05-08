@@ -99,12 +99,13 @@ def train_model(model, train_loader, val_samples, optimizer, scheduler, num_epoc
         current_lr = optimizer.param_groups[0]['lr']
         scheduler.step(val_loss)
         logger.log_epoch_loss(val_loss, epoch, current_lr)
-
-        kaggle_async_eval(
-            epoch=epoch,
-            logger=logger,
-            model=inference_model,
-        )
+        
+        if epoch % 5:
+            kaggle_async_eval(
+                epoch=epoch,
+                logger=logger,
+                model=inference_model,
+            )
 
         if val_loss is not None and val_loss < best_loss:
             best_loss = val_loss
