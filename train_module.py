@@ -100,7 +100,7 @@ def train_model(model, train_loader, val_samples, optimizer, scheduler, num_epoc
         scheduler.step(val_loss)
         logger.log_epoch_loss(val_loss, epoch, current_lr)
         
-        if epoch % 5:
+        if epoch % 5 == 4:
             kaggle_async_eval(
                 epoch=epoch,
                 logger=logger,
