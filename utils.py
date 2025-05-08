@@ -144,7 +144,7 @@ def split_data_task1(inputs_list: List[RadarSampleInputs], val_ratio=0.25, split
     train_buildings = building_ids[n_buildings_valid:]
 
     val_inputs, train_inputs = [], []
-    for f in inputs_list[:100]: # TODO fix after debug to 360*128
+    for f in inputs_list: # [:100]:
         if f.ids[0] in val_buildings:
             val_inputs.append(f)
         else:
@@ -161,7 +161,6 @@ def split_data_task1(inputs_list: List[RadarSampleInputs], val_ratio=0.25, split
 
 
 def split_data_task2(inputs_list: List[RadarSampleInputs], val_freqs, split_save_path=None):
-    # inputs_list = np.random.choice(inputs_list, 100) # TODO remove after debug
     train_inputs, val_inputs = split_data_task1(inputs_list)
     val_freqs = val_freqs if isinstance(val_freqs, list) else [val_freqs]
     val_inputs = [f for f in val_inputs if f.ids[2] in val_freqs]

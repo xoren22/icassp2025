@@ -63,7 +63,6 @@ def train_model(model, train_loader, val_samples, optimizer, scheduler, num_epoc
             inputs = inputs.to(device)
             targets = targets.to(device)
             masks = masks.to(device)
-
             optimizer.zero_grad()
             with autocast('cuda'):
                 preds = model(inputs)

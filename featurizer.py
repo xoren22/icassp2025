@@ -4,6 +4,7 @@ from numba import njit
 from scipy.ndimage import gaussian_filter
 
 from _types import RadarSample
+from config import OUTPUT_SCALER
 from utils import calculate_distance
 
 
@@ -76,7 +77,7 @@ def _calculate_transmittance_loss_numpy(transmittance_matrix, x_ant, y_ant, n_an
 
     return output
 
-def calculate_transmittance_loss(transmittance_matrix, x_ant, y_ant, n_angles=360*128, radial_step=1.0, max_walls=10, smooth=True):
+def calculate_transmittance_loss(transmittance_matrix, x_ant, y_ant, n_angles=360*1, radial_step=1.0, max_walls=10, smooth=True):
     transmittance_np = transmittance_matrix.cpu().numpy()
     output_np = _calculate_transmittance_loss_numpy(transmittance_np, x_ant, y_ant, n_angles, radial_step, max_walls)
     if smooth:
@@ -93,16 +94,14 @@ def calculate_fspl(
     
     return fspl_db
 
-
-
 def normalize_input(input_tensor):
     normalized = input_tensor.clone()
     normalized[0] = normalized[0] / 10.0 # reflecatnace is ~12
     normalized[1] = normalized[1] / 10.0 # transmittance is ~12
-    normalized[2] = 20.0 * torch.log10(normalized[2]) / 100.0 # distance
-    normalized[3] = 20.0 * torch.log10(normalized[3]) / 100.0 # frequency
-    normalized[4] = normalized[4] / 100.0 # free space pathloss
-    normalized[5] = normalized[4] / 100.0 # tranmittance loss
+    normalized[2] = 20.0 * torch.log10(normalized[2]) / OUTPUT_SCALER # distance
+    normalized[3] = 20.0 * torch.log10(normalized[3]) / OUTPUT_SCALER # frequency
+    normalized[4] = normalized[4] / OUTPUT_SCALER # free space pathloss
+    normalized[5] = normalized[4] / OUTPUT_SCALER # tranmittance loss
     # normalized[6] is the mask and is left as is
     return normalized
 

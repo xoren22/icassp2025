@@ -2,6 +2,7 @@ import torch
 from typing import List, Union, Dict
 
 from utils import load_model
+from config import OUTPUT_SCALER
 from _types import RadarSampleInputs
 from featurizer import featurize_inputs
 from augmentations import normalize_size, resize_linear
@@ -73,6 +74,7 @@ class PathlossPredictor:
         batch_tensor = torch.stack(batched_tensors, dim=0)  # [B, C, H, W]
         with torch.no_grad():
             preds = self.model(batch_tensor)  
+            preds *= OUTPUT_SCALER
 
         results = []
         for i in range(len(input_samples)):

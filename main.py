@@ -18,7 +18,7 @@ def main():
     parser.add_argument('--num_workers', type=int, default=0, help='number of workers')
     
     parser.add_argument('--gpu', type=int, default=None, help='GPU ID to use (default: auto-seleqct)')
-    parser.add_argument('--batch_size', type=int, default=2, help='Batch size for training')
+    parser.add_argument('--batch_size', type=int, default=8, help='Batch size for training')
     parser.add_argument('--epochs', type=int, default=2000, help='Number of epochs to train')
     parser.add_argument('--lr', type=float, default=3e-4, help='Learning rate')
     parser.add_argument('--data_dir', type=str, default='data/train/', help='Data directory')
