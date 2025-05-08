@@ -78,6 +78,10 @@ def train_model(model, train_loader, val_samples, optimizer, scheduler, num_epoc
                     loss = batch_mse
 
             scaler.scale(loss).backward()
+
+            scaler.unscale_(optimizer)
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
+
             scaler.step(optimizer)
             scaler.update()
 

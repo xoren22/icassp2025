@@ -7,6 +7,7 @@ import torchvision.transforms.functional as TF
 from torchvision.transforms.functional import InterpolationMode
 
 from _types import RadarSample
+from featurizer import calculate_transmittance_loss
 
 
 def resize_nearest(img, new_size):
@@ -92,18 +93,23 @@ class GeometricAugmentation(BaseAugmentation):
     def __init__(
             self,
             p: float = 0.5,
+            wall_p: float = 0.5,
+            transmittance_range: Optional[Tuple[int, int]] = None,
             flip_vertical: bool = False,
             flip_horizontal: bool = False,
             angle_range: Optional[Tuple[float, float]] = None,
             cardinal_rotation: bool = False,
             scale_range: Optional[Tuple[float, float]] = None,
+
     ):
         self.p = p
+        self.wall_p = wall_p
         self.scale_range = scale_range
         self.angle_range = angle_range
         self.cardinal_rotation = cardinal_rotation
         self.flip_horizontal = flip_horizontal
         self.flip_vertical = flip_vertical
+        self.transmittance_range = transmittance_range or (2, 12)
     
     def _apply_distance_scaling(self, sample: RadarSample, scale_factor: float) -> RadarSample:
         sample.pixel_size *= scale_factor
@@ -202,9 +208,32 @@ class GeometricAugmentation(BaseAugmentation):
         sample.H, sample.W = new_H, new_W
         return sample
 
+    def _apply_walls(self, sample: RadarSample, transmittance_range: Tuple[int, int]) -> RadarSample:
+        H, W = sample.H, sample.W
+        walls = torch.zeros((H, W))
+        nv = random.randint(1, max(2, W // 3))
+        nh = random.randint(1, max(2, H // 3))
+        v_cols = torch.randperm(W)[:nv]
+        h_rows = torch.randperm(H)[:nh]
+        vmax = random.randint(*transmittance_range)
+        walls[:, v_cols] = torch.randint(1, vmax, (nv,)).float()
+        walls[h_rows, :] = torch.randint(1, vmax, (nh,)).float().unsqueeze(1)
+
+        m = sample.mask == 1
+        sample.transmittance[m] += walls[m]
+
+        loss = calculate_transmittance_loss(walls, sample.x_ant, sample.y_ant)
+        if sample.output_img is not None:
+            sample.output_img[m] += loss[m]
+        
+        return sample
+
     def __call__(self, sample: RadarSample) -> RadarSample:
         if random.random() > self.p:
             return sample
+        
+        if random.random() < self.wall_p:
+            sample = self._apply_walls(sample, self.transmittance_range)
 
         if self.scale_range is not None:
             scale_factor = random.uniform(*self.scale_range)
