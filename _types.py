@@ -40,7 +40,7 @@ class RadarSampleInputs:
     output_file: Union[str, None]
     position_file: str
     sampling_position : int
-    ids: Optional[Tuple[int, int, int, int]] = None
+    ids: Tuple[int, int, int, int]
 
     def asdict(self):
         return asdict(self)

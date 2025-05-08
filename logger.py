@@ -2,7 +2,7 @@ import os
 from datetime import datetime
 from torch.utils.tensorboard import SummaryWriter
 
-from config import LOG_DIR
+from config import LOG_DIR, OUTPUT_SCALER
 
 
 class TrainingLogger:
@@ -27,7 +27,7 @@ class TrainingLogger:
         self.global_step += 1
 
     def log_epoch_loss(self, val_epoch_loss, epoch, learning_rate=None):
-        epoch_training_loss = (self.train_batch_se_sum / (self.train_batch_mask_sum + 1e-8))**0.5
+        epoch_training_loss = OUTPUT_SCALER * (self.train_batch_se_sum / (self.train_batch_mask_sum + 1e-8))**0.5
 
         self.train_batch_se_sum = 0.0
         self.train_batch_mask_sum = 0

@@ -6,7 +6,7 @@ from torch.utils.data import DataLoader
 
 from model import UNetModel
 from logger import TrainingLogger
-from utils import split_data_task2
+from utils import split_data_task1
 from train_module import train_model
 from _types import RadarSampleInputs
 from data_module import PathlossDataset
@@ -15,7 +15,7 @@ from augmentations import AugmentationPipeline, GeometricAugmentation
 def main():
     parser = argparse.ArgumentParser(description='Train and evaluate pathloss prediction model')
 
-    parser.add_argument('--num_workers', type=int, default=0, help='number of workers')
+    parser.add_argument('--num_workers', type=int, default=4, help='number of workers')
     
     parser.add_argument('--gpu', type=int, default=None, help='GPU ID to use (default: auto-seleqct)')
     parser.add_argument('--batch_size', type=int, default=8, help='Batch size for training')
@@ -38,15 +38,15 @@ def main():
     freqs_MHz = [868, 1800, 3500]
     BASE_DIR = os.path.dirname(os.path.abspath(__file__))
     DATA_DIR = os.path.join(BASE_DIR, args.data_dir)
-    INPUT_PATH = os.path.join(DATA_DIR, f"Inputs/Task_2_ICASSP/")
-    OUTPUT_PATH = os.path.join(DATA_DIR, f"Outputs/Task_2_ICASSP/")
+    INPUT_PATH = os.path.join(DATA_DIR, f"Inputs/Task_1_ICASSP/")
+    OUTPUT_PATH = os.path.join(DATA_DIR, f"Outputs/Task_1_ICASSP/")
     POSITIONS_PATH = os.path.join(DATA_DIR, "Positions/")
     MODEL_SAVE_PATH = os.path.join(BASE_DIR, args.model_dir)
     
     inputs_list = []
     for b in range(1, 26):  # 25 buildings
         for ant in range(1, 3):  # 2 antenna types
-            for f in range(1, 4):  # 3 frequencies
+            for f in range(1, 2):  # 3 frequencies
                 for sp in range(80):  # 80 sampling positions
                     # Check if file exists
                     input_file = f"B{b}_Ant{ant}_f{f}_S{sp}.png"
@@ -80,15 +80,15 @@ def main():
     print(f"\nLogging results at {logger.log_dir}\n\n")
 
     split_save_path=os.path.join(logger.log_dir, "train_val_split.pkl")
-    train_files, val_files = split_data_task2(inputs_list, val_freqs=None, split_save_path=split_save_path)
+    train_files, val_files = split_data_task1(inputs_list, split_save_path=split_save_path)
     print(f"Train: {len(train_files)}, Validation: {len(val_files)}")
     
     augmentations = AugmentationPipeline(
         [
             GeometricAugmentation(
                 p=0.5,
-                angle_range=(-30, 30),
-                scale_range=(1/1.5, 1.5),
+                # angle_range=(-30, 30),
+                # scale_range=(1/1.5, 1.5),
                 flip_vertical=True,
                 flip_horizontal=True,
                 cardinal_rotation=True,
@@ -96,7 +96,7 @@ def main():
         ]
     )
     
-    train_dataset = PathlossDataset(inputs_list=train_files, load_output=True, training=True, augmentations=augmentations)
+    train_dataset = PathlossDataset(inputs_list=train_files, augmentations=augmentations)
     train_loader = DataLoader(train_dataset, batch_size=args.batch_size, shuffle=True, num_workers=args.num_workers)
     
     model = UNetModel().to(device)
@@ -114,7 +114,7 @@ def main():
         logger=logger, 
         device=device, 
         save_dir=MODEL_SAVE_PATH, # "/dev/null"
-        use_sip2net=True,
+        use_sip2net=False,
     )
 
 if __name__ == "__main__":

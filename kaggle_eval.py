@@ -15,20 +15,20 @@ def _generate_solution_df(model: PathlossPredictor, verbose=False, batch_size=8)
     groups of `batch_size`.
     """
     # 1) Gather all sample dictionaries.
+    ant, f = 1, 1
+    freq_mhz = [868][f-1]
+
     samples = []
-    for f_i in [1]:
-        freq_mhz = 868
-        for b in [1, 5]:
-            for sp in range(25):
-                sample_id_prefix = f"B{b}_Ant1_f{f_i}_S{sp}_"
-                samples.append({
-                    'freq_MHz': freq_mhz,
-                    'sampling_position': sp,
-                    'input_file': f"{BASE_DIR}/data/kaggle/Evaluation_Data_T1/Inputs/Task_1/B{b}_Ant1_f{f_i}_S{sp}.png",
-                    'position_file': f"{BASE_DIR}/data/kaggle/Evaluation_Data_T1/Positions/Positions_B{b}_Ant1_f{f_i}.csv",
-                    # We'll store the ID prefix for generating row labels later
-                    'id_prefix': sample_id_prefix
-                })
+    for b in [1, 5]:
+        for sp in range(25):
+            samples.append({
+                'freq_MHz': freq_mhz,
+                'ids': (b, ant, f, sp),
+                'id_prefix': f"B{b}_Ant1_f{f}_S{sp}_",
+                'sampling_position': sp,
+                'input_file': f"{BASE_DIR}/data/kaggle/Evaluation_Data_T1/Inputs/Task_1/B{b}_Ant{ant}_f{f}_S{sp}.png",
+                'position_file': f"{BASE_DIR}/data/kaggle/Evaluation_Data_T1/Positions/Positions_B{b}_Ant{ant}_f{f}.csv",
+            })
 
     # 2) Batch predict and build the solution rows.
     solution_parts = []

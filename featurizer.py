@@ -101,7 +101,7 @@ def normalize_input(input_tensor):
     normalized[2] = 20.0 * torch.log10(normalized[2]) / OUTPUT_SCALER # distance
     normalized[3] = 20.0 * torch.log10(normalized[3]) / OUTPUT_SCALER # frequency
     normalized[4] = normalized[4] / OUTPUT_SCALER # free space pathloss
-    normalized[5] = normalized[4] / OUTPUT_SCALER # tranmittance loss
+    normalized[5] = normalized[5] / OUTPUT_SCALER # tranmittance loss
     # normalized[6] is the mask and is left as is
     return normalized
 

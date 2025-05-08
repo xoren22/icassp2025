@@ -6,6 +6,7 @@ from typing import Union
 from torch.utils.data import Dataset
 from torchvision.io import read_image
 
+from config import OUTPUT_SCALER
 from featurizer import featurize_inputs
 from augmentations import normalize_size
 from _types import RadarSample, RadarSampleInputs
@@ -41,7 +42,8 @@ def read_sample(inputs: Union[RadarSampleInputs, dict]):
     if x_ant < 0 or x_ant >= W or y_ant < 0 or y_ant >= H:
         b, ant, f, sp = ids
         print(f"Antenna out of the bouds for B{b}_Ant{ant}_f{f}_S{sp}.png -- Skipping")
-        return
+        x_ant = max(0, min(x_ant, W - 1))
+        y_ant = max(0, min(y_ant, H - 1))
     
     sample = RadarSample(
         H=H,
@@ -64,12 +66,10 @@ def read_sample(inputs: Union[RadarSampleInputs, dict]):
 class PathlossDataset(Dataset):
     def __init__(self, 
         inputs_list,  
-        training=False, load_output=True, augmentations=None,
+        augmentations=None,
     ):
 
-        self.training = training
         self.inputs_list = inputs_list
-        self.load_output = load_output
         self.augmentations = augmentations
 
         self.target_size = IMG_TARGET_SIZE
@@ -85,7 +85,7 @@ class PathlossDataset(Dataset):
 
 
     def __len__(self):
-        return len(self.inputs_list)
+        return len(self.samples)
 
 
     def __getitem__(self, idx):
@@ -93,8 +93,8 @@ class PathlossDataset(Dataset):
         if self.augmentations is not None:
             sample = self.augmentations(sample)
 
-        output_tensor = sample.output_img if sample.output_img is not None else None
         input_tensor = featurize_inputs(sample=sample)
+        output_tensor = sample.output_img / OUTPUT_SCALER # normalizing the output
         mask = sample.mask
 
         return input_tensor, output_tensor, mask   
