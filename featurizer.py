@@ -96,12 +96,12 @@ def calculate_fspl(
 
 def normalize_input(input_tensor):
     normalized = input_tensor.clone()
-    normalized[0] = normalized[0] / 10.0 # reflecatnace is ~12
-    normalized[1] = normalized[1] / 10.0 # transmittance is ~12
-    normalized[2] = 20.0 * torch.log10(normalized[2]) / OUTPUT_SCALER # distance
-    normalized[3] = 20.0 * torch.log10(normalized[3]) / OUTPUT_SCALER # frequency
-    normalized[4] = normalized[4] / OUTPUT_SCALER # free space pathloss
-    normalized[5] = normalized[5] / OUTPUT_SCALER # tranmittance loss
+    normalized[0] = (normalized[0] - 9.0) / 9.0 # reflecatnace is ~12
+    normalized[1] = (normalized[1] - 9.0) / 9.0 # transmittance is ~12
+    normalized[2] = torch.log10(normalized[2]) - 1.0 # distance
+    normalized[3] = torch.log10(normalized[3]) - 3.0 # frequency
+    normalized[4] = (normalized[4] - 87.0) / 73.0 # free space pathloss
+    normalized[5] = (normalized[5] - 87.0) / 73.0 # tranmittance+fspl loss
     # normalized[6] is the mask and is left as is
     return normalized
 

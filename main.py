@@ -15,7 +15,7 @@ from augmentations import AugmentationPipeline, GeometricAugmentation
 def main():
     parser = argparse.ArgumentParser(description='Train and evaluate pathloss prediction model')
 
-    parser.add_argument('--num_workers', type=int, default=4, help='number of workers')
+    parser.add_argument('--num_workers', type=int, default=0, help='number of workers')
     
     parser.add_argument('--gpu', type=int, default=None, help='GPU ID to use (default: auto-seleqct)')
     parser.add_argument('--batch_size', type=int, default=32, help='Batch size for training')
