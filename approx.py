@@ -125,7 +125,7 @@ def calculate_fspl(
 
 
 
-@njit
+@njit(parallel=True, fastmath=True, nogil=True, boundscheck=False)
 def _calculate_transmittance_loss_numpy(
     transmittance_matrix,
     x_ant,
@@ -370,6 +370,75 @@ def _calculate_hybrid_loss_mc_numpy_fast(
 
     return output
 
+
+def _calculate_reflectance_eff_numpy(
+    reflectance_matrix: np.ndarray,
+    transmittance_matrix: np.ndarray,
+    x_ant: float,
+    y_ant: float,
+    n_angles: int = 360*128,
+    radial_step: float = 1.0,
+    max_walls: int = 5,
+    reflection_prob: float = 0.5
+) -> np.ndarray:
+    """
+    Single‐ray effective attenuation: each wall interface
+    contributes an expected loss a_eff = p_refl*R + (1-p_refl)*T.
+    March one ray per angle, accumulate these a_eff losses,
+    and record the per-pixel minimum accumulated loss.
+    """
+    h, w = reflectance_matrix.shape
+    # initialize to a large value
+    output = np.full((h, w), np.inf, dtype=np.float32)
+
+    two_pi = 2.0 * np.pi
+    dtheta = two_pi / n_angles
+    cosv = np.cos(np.arange(n_angles) * dtheta)
+    sinv = np.sin(np.arange(n_angles) * dtheta)
+    max_dist = np.hypot(w, h)
+
+    for i in prange(n_angles):
+        dx = cosv[i]
+        dy = sinv[i]
+        sum_loss = 0.0
+        last_val = -1.0  # sentinel: not yet on material
+        r = 0.0
+        # march until edge
+        while r <= max_dist:
+            x = x_ant + r * dx
+            y = y_ant + r * dy
+            px = int(x + 0.5)
+            py = int(y + 0.5)
+            if px < 0 or px >= w or py < 0 or py >= h:
+                break
+            val = reflectance_matrix[py, px]
+            # on interface if crossing from material->air or air->material
+            if last_val >= 0.0 and val != last_val:
+                # expected attenuation at this interface
+                R = reflectance_matrix[py, px]
+                T = transmittance_matrix[py, px]
+                a_eff = reflection_prob * R + (1.0 - reflection_prob) * T
+                sum_loss += a_eff
+                # count walls and stop after max_walls
+                last_val = val
+                # record this loss at the interface pixel
+                if sum_loss < output[py, px]:
+                    output[py, px] = sum_loss
+                # optionally stop is reached walls cap
+                # but effective doesn't branch so continue
+            last_val = val
+            # record cumulative loss at every pixel
+            if sum_loss < output[py, px]:
+                output[py, px] = sum_loss
+            r += radial_step
+
+    return output
+
+
+@njit(parallel=True, fastmath=True, nogil=True, boundscheck=False)
+
+
+
 class Approx:
     def approximate(self, sample : RadarSample) -> torch.Tensor:
         ref, trans, dist = sample.input_img.cpu().numpy()
@@ -384,7 +453,10 @@ class Approx:
         trans_feat = gaussian_filter(trans_feat, sigma=5.0, mode='reflect')
         trans_feat = np.minimum(trans_feat+fspl, 160.0)
 
-        approx = np.floor(np.minimum(trans_feat, ref_feat))
+        eff_feat = _calculate_reflectance_eff_numpy(ref, trans, x_ant, y_ant)
+        eff_feat = np.minimum(eff_feat+fspl, 160.0)
+
+        approx = np.floor(np.minimum(trans_feat, eff_feat))
 
         return torch.from_numpy(approx)
     
