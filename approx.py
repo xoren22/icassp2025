@@ -1,32 +1,51 @@
-# approx.py
-
 import os
-import math
 import torch
 import numpy as np
 import pandas as pd
-from numba import njit
+from tqdm import tqdm
+from numba import njit, prange
 from torchvision.io import read_image
+import matplotlib.pyplot as plt
+ 
 from scipy.ndimage import gaussian_filter
-from kaggle_eval import kaggle_async_eval
 from dataclasses import dataclass, asdict
 from typing import Union, Tuple, Optional, List
+
+from kaggle_eval import kaggle_async_eval
+
+
+IMG_TARGET_SIZE = 640
+INITIAL_PIXEL_SIZE = 0.25
 
 
 @dataclass
 class RadarSample:
     H: int
     W: int
-    x_ant: List[float]
-    y_ant: List[float]
-    azimuth: List[float]
-    freq_MHz: List[float]
-    input_img: torch.Tensor    # Format (C, H, W), includes transmittance channel
-    output_img: torch.Tensor   # (H, W) or (1, H, W) ground-truth pathloss
-    radiation_pattern: List[torch.Tensor]
+    x_ant: float
+    y_ant: float
+    azimuth: float
+    freq_MHz: float
+    input_img: torch.Tensor  # In format (C, H, W)
+    output_img: torch.Tensor  # In format (H, W) or (1, H, W)
     pixel_size: float = 0.25
     mask: Union[torch.Tensor, None] = None
     ids: Optional[List[Tuple[int, int, int, int]]] = None
+
+    def copy(self):
+        return RadarSample(
+                    self.H,
+                    self.W,
+                    self.x_ant,
+                    self.y_ant,
+                    self.azimuth,
+                    self.freq_MHz,
+                    self.input_img,  
+                    self.output_img, 
+                    self.pixel_size,
+                    self.mask,
+                    self.ids,
+                )
 
 @dataclass
 class RadarSampleInputs:
@@ -34,35 +53,26 @@ class RadarSampleInputs:
     input_file: str
     output_file: Union[str, None]
     position_file: str
-    radiation_pattern_file: str
-    sampling_position: int
-    id_prefix : object
+    sampling_position : int
     ids: Optional[Tuple[int, int, int, int]] = None
 
     def asdict(self):
         return asdict(self)
-
+    
     def __post_init__(self):
-        # Basic sanity checks
         if self.ids and not all(isinstance(i, int) for i in self.ids):
-            raise ValueError("All IDs must be integers.")
+            raise ValueError("All IDs must be integers")
+        
         if not isinstance(self.freq_MHz, (int, float)):
-            raise ValueError("freq_MHz must be numeric.")
-
-        # Ensure file existence (comment out if you have some missing paths on purpose)
-        for path_attr in ['input_file', 'position_file', 'radiation_pattern_file']:
+            raise ValueError("freq_MHz must be a number")
+        
+        for path_attr in ['input_file', 'position_file']:
             path = getattr(self, path_attr)
-            if path and not os.path.exists(path):
+            if not os.path.exists(path):
                 raise FileNotFoundError(f"File not found: {path}")
+    
 
-def read_sample(inputs: Union[RadarSampleInputs, dict]) -> RadarSample:
-    """
-    Reads one sample from the provided file paths:
-      - input_file (transmittance + possibly other channels)
-      - output_file (ground-truth pathloss)
-      - position_file (CSV with X, Y, Azimuth)
-      - radiation_pattern_file
-    """
+def read_sample(inputs: Union[RadarSampleInputs, dict]):
     if isinstance(inputs, RadarSampleInputs):
         inputs = inputs.asdict()
 
@@ -70,43 +80,49 @@ def read_sample(inputs: Union[RadarSampleInputs, dict]) -> RadarSample:
     input_file = inputs["input_file"]
     output_file = inputs.get("output_file")
     position_file = inputs["position_file"]
-    radiation_pattern_file = inputs["radiation_pattern_file"]
     sampling_position = inputs["sampling_position"]
-    ids = inputs.get("ids")
-
-    input_img = read_image(input_file).float()[:2]  # Keep first 2 channels
+    
+    input_img = read_image(input_file).float()
     C, H, W = input_img.shape
-
+    
     output_img = None
     if output_file:
         output_img = read_image(output_file).float()
-        if output_img.dim() == 3 and output_img.size(0) == 1:
-            output_img = output_img.squeeze(0)  # (1,H,W) => (H,W)
-
-    # Position CSV
-    df_positions = pd.read_csv(position_file)
-    x_ant, y_ant, azimuth = df_positions.loc[sampling_position, ["Y", "X", "Azimuth"]]
-
-    # Radiation pattern
-    radiation_pattern_np = np.genfromtxt(radiation_pattern_file, delimiter=',')
-    radiation_pattern = torch.from_numpy(radiation_pattern_np).float()
-
-    # Build the RadarSample
+        if output_img.size(0) == 1:  # If single channel, remove channel dimension
+            output_img = output_img.squeeze(0)
+        
+    sampling_positions = pd.read_csv(position_file)
+    x_ant, y_ant, azimuth = sampling_positions.loc[int(sampling_position), ["Y", "X", "Azimuth"]]
+    
     sample = RadarSample(
         H=H,
         W=W,
-        x_ant=[x_ant],
-        y_ant=[y_ant],
-        azimuth=[azimuth],
-        freq_MHz=[freq_MHz],
+        x_ant=x_ant,
+        y_ant=y_ant,
+        azimuth=azimuth,
+        freq_MHz=freq_MHz,
         input_img=input_img,
         output_img=output_img,
-        radiation_pattern=[radiation_pattern],
-        pixel_size=0.25,
+        pixel_size=INITIAL_PIXEL_SIZE,
         mask=torch.ones((H, W)),
-        ids=ids,
     )
+
+    if 0 > sample.x_ant >= sample.W or 0 > sample.y_ant >= sample.H:
+        print(f"Warning: antenna coords out of range. (x_ant={sample.x_ant}, y_ant={sample.y_ant}), (W={sample.W}, H={sample.H}) -> clamping to valid range.")
+    
     return sample
+
+
+def calculate_fspl(
+    dist_m,               # distance in meters (torch tensor)
+    freq_MHz,             # frequency in MHz
+    min_dist_m=0.125,     # clamp distance below this
+):
+    dist_clamped = np.maximum(dist_m, min_dist_m)
+    fspl_db = 20.0 * np.log10(dist_clamped) + 20.0 * np.log10(freq_MHz) - 27.55
+
+    return fspl_db
+
 
 
 @njit
@@ -215,70 +231,162 @@ def _calculate_transmittance_loss_numpy(
 
     return output
 
-def calculate_transmittance_loss(
-    transmittance_matrix: torch.Tensor,
+
+
+@njit(parallel=True, fastmath=True)
+def _calculate_hybrid_loss_mc_numpy_fast(
+    reflectance_matrix: np.ndarray,
+    transmittance_matrix: np.ndarray,
     x_ant: float,
     y_ant: float,
-    n_angles=360*128,
-    radial_step=1.0,
-    max_walls=10
-) -> torch.Tensor:
-    trans_np = transmittance_matrix.cpu().numpy().astype(np.float32)
-    output_np = _calculate_transmittance_loss_numpy(
-        trans_np, x_ant, y_ant, n_angles, radial_step, max_walls
-    )
+    n_angles: int = 360*64,
+    radial_step: float = 1.0,
+    max_reflect: int = 5,
+    max_transmit: int = 10,
+    reflection_prob: float = 0.5,
+    samples_per_angle: int = 8,
+    max_loss: float = 160.0
+) -> np.ndarray:
+    h, w = reflectance_matrix.shape
+    # initialize to max_loss
+    output = np.full((h, w), max_loss, dtype=np.float32)
 
-    np.clip(output_np, 0.0, 160.0, out=output_np)
+    # precompute dirs
+    two_pi = 2.0 * np.pi
+    dtheta = two_pi / n_angles
+    cos_vals = np.cos(np.arange(n_angles) * dtheta)
+    sin_vals = np.sin(np.arange(n_angles) * dtheta)
+    max_dist = np.hypot(w, h)
 
-    return torch.from_numpy(output_np)
+    # precompute RNG array once
+    rng_count = n_angles * samples_per_angle * (max_reflect + max_transmit)
+    rng = (np.arange(rng_count, dtype=np.int64) * 1103515245 + 12345) & 0x7FFFFFFF
+    rng = (rng / np.float32(2**31))
 
-def calculate_distance(x_ant, y_ant, H, W, pixel_size):
-    """
-    Returns a (H,W) tensor with the distance from (x_ant, y_ant) to each pixel center.
-    """
-    y_grid, x_grid = torch.meshgrid(
-        torch.arange(H, dtype=torch.float32),
-        torch.arange(W, dtype=torch.float32),
-        indexing='ij'
-    )
-    dist = torch.sqrt((x_grid - x_ant)**2 + (y_grid - y_ant)**2)
-    dist_m = dist * pixel_size
-    return dist_m
+    # Parallel over angles
+    for i in prange(n_angles):
+        dx0 = cos_vals[i]
+        dy0 = sin_vals[i]
+        base_rng_i = i * samples_per_angle * (max_reflect + max_transmit)
 
-def calculate_fspl(
-    dist_m: torch.Tensor,
-    freq_MHz: float,
-    antenna_gain: torch.Tensor,
-    min_dist_m: float = 0.125
-):
-    """
-    FSPL(dB) = 20 log10(dist) + 20 log10(freq) - 27.55, minus antenna_gain.
-    """
-    dist_clamped = torch.clamp(dist_m, min=min_dist_m)
-    fspl_db = 20.0 * dist_clamped.log10() + 20.0 * math.log10(freq_MHz) - 27.55
+        for s in range(samples_per_angle):
+            # ray state
+            x = x_ant
+            y = y_ant
+            dx = dx0
+            dy = dy0
+            sum_loss = 0.0
+            last_val = -1.0  # sentinel
+            refl_ct = 0
+            trans_ct = 0
+            rng_idx = base_rng_i + s * (max_reflect + max_transmit)
 
-    return fspl_db - antenna_gain
+            # march until both caps or loss cap hit
+            while True:
+                # trace along this direction to next boundary
+                traveled = 0.0
+                hit_px = hit_py = -1
 
+                while traveled <= max_dist:
+                    x += dx * radial_step
+                    y += dy * radial_step
+                    traveled += radial_step
+
+                    px = int(round(x))
+                    py = int(round(y))
+                    if px < 0 or px >= w or py < 0 or py >= h:
+                        # out of image
+                        traveled = max_dist + 1.0
+                        break
+
+                    # update best (min) loss so far
+                    if sum_loss < output[py, px]:
+                        output[py, px] = sum_loss
+
+                    # check for boundary
+                    val = reflectance_matrix[py, px]
+                    if last_val < 0.0:
+                        last_val = val
+                    if val != last_val:
+                        hit_px, hit_py = px, py
+                        break
+                    last_val = val
+
+                if hit_px < 0:
+                    break  # left image
+
+                # decide branch
+                if refl_ct >= max_reflect and trans_ct >= max_transmit:
+                    break
+                elif refl_ct >= max_reflect:
+                    branch = 0
+                elif trans_ct >= max_transmit:
+                    branch = 1
+                else:
+                    branch = 1 if rng[rng_idx] < reflection_prob else 0
+                    rng_idx += 1
+
+                # apply loss + update
+                if branch == 1:
+                    # reflect
+                    sum_loss += reflectance_matrix[hit_py, hit_px]
+                    refl_ct += 1
+                    # estimate normal (4-nbr) and reflect dir
+                    nx = 0.0; ny = 0.0
+                    # inline neighbor checks
+                    if hit_px > 0 and reflectance_matrix[hit_py, hit_px-1] != val:
+                        nx -= 1.0
+                    if hit_px < w-1 and reflectance_matrix[hit_py, hit_px+1] != val:
+                        nx += 1.0
+                    if hit_py > 0 and reflectance_matrix[hit_py-1, hit_px] != val:
+                        ny -= 1.0
+                    if hit_py < h-1 and reflectance_matrix[hit_py+1, hit_px] != val:
+                        ny += 1.0
+                    norm = np.hypot(nx, ny)
+                    if norm > 0.0:
+                        nx /= norm; ny /= norm
+                    else:
+                        nx, ny = -dx, -dy
+                    # reflect vector
+                    dot = dx*nx + dy*ny
+                    dx -= 2.0 * dot * nx
+                    dy -= 2.0 * dot * ny
+                    mag = np.hypot(dx, dy)
+                    if mag > 0.0:
+                        dx /= mag; dy /= mag
+                else:
+                    # transmit
+                    sum_loss += transmittance_matrix[hit_py, hit_px]
+                    trans_ct += 1
+                    # direction unchanged
+
+                # cap-check
+                if sum_loss >= max_loss:
+                    break
+
+                # continue from this boundary
+                x = hit_px
+                y = hit_py
+
+    return output
 
 class Approx:
     def approximate(self, sample : RadarSample) -> torch.Tensor:
-        trans = sample.input_img[1]  # second channel = transmittance
-        dist = calculate_distance(sample.x_ant[0], sample.y_ant[0], sample.H, sample.W, sample.pixel_size)
-        trans_loss = calculate_transmittance_loss(trans, sample.x_ant[0], sample.y_ant[0])
+        ref, trans, dist = sample.input_img.cpu().numpy()
+        x_ant, y_ant = sample.x_ant, sample.y_ant
 
-        sigma_px = 5.0 * (0.25 / sample.pixel_size)
-        trans_loss_smooth = torch.from_numpy(gaussian_filter(trans_loss.numpy(), sigma=sigma_px, mode='reflect'))
+        fspl = calculate_fspl(dist_m=dist, freq_MHz=sample.freq_MHz)
 
-        fspl = calculate_fspl(
-            dist_m=dist,
-            freq_MHz=sample.freq_MHz[0],
-            antenna_gain=torch.zeros_like(dist)
-        )
-        approx = trans_loss_smooth + fspl
-        approx = torch.floor(approx)          # round down
-        approx = torch.clamp(approx, max=160.0)   # global clip
+        ref_feat = _calculate_hybrid_loss_mc_numpy_fast(ref, trans, x_ant, y_ant, n_angles=360*128, samples_per_angle=32, radial_step=1.0, max_reflect=5, max_transmit=10, reflection_prob=0.5, max_loss=160)
+        ref_feat = np.minimum(ref_feat+fspl, 160.0)
+        
+        trans_feat = _calculate_transmittance_loss_numpy(trans, x_ant, y_ant, n_angles=360*128, radial_step=1.0, max_walls=10)
+        trans_feat = gaussian_filter(trans_feat, sigma=5.0, mode='reflect')
+        trans_feat = np.minimum(trans_feat+fspl, 160.0)
 
-        return approx
+        approx = np.floor(np.minimum(trans_feat, ref_feat))
+
+        return torch.from_numpy(approx)
     
     def predict(self, samples):
         samples = [read_sample(s) for s in samples]
