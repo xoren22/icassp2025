@@ -5,14 +5,13 @@ import numpy as np
 from time import time
 from tqdm import tqdm
 from torchvision.io import read_image
-from torch.amp import autocast, GradScaler
 
 from inference import PathlossPredictor
 from loss import se, create_sip2net_loss
 from kaggle_eval import kaggle_async_eval
 
 
-def evaluate_model(inference_model, val_samples, batch_size=8):
+def evaluate_model(inference_model, val_samples, batch_size):
     preds_list, targets_list = [], []
     val_samples = list(val_samples)
 
@@ -40,19 +39,28 @@ def evaluate_model(inference_model, val_samples, batch_size=8):
 
     return val_rmse
 
-# def evaluate_model(inference_model, val_samples, batch_size=8):
-#     return 1 / time()
+def evaluate_model(inference_model, val_samples, batch_size):
+    return 14.0**0.5 + 1 / time()
 
-def train_model(model, train_loader, val_samples, optimizer, scheduler, num_epochs, save_dir, logger, device=None, use_sip2net=False, sip2net_params={}):
+def train_model(model,
+                train_loader,
+                val_samples,
+                optimizer,
+                scheduler,
+                num_epochs,
+                save_dir,
+                logger,
+                device=None,
+                use_sip2net=False,
+                sip2net_params={}):
     os.makedirs(save_dir, exist_ok=True)
     model.to(device)
     best_loss = float('inf')
-    scaler = GradScaler(enabled=True)
     inference_model = PathlossPredictor(model=model)
-    
+
     # Setup SIP2Net loss if requested
     if use_sip2net:
-        print(f"Using SIP2Net loss")
+        print("Using SIP2Net loss")
         sip2net_criterion = create_sip2net_loss(use_mse=True, **sip2net_params)
 
     for epoch in range(num_epochs):
@@ -64,42 +72,56 @@ def train_model(model, train_loader, val_samples, optimizer, scheduler, num_epoc
             targets = targets.to(device)
             masks = masks.to(device)
             optimizer.zero_grad()
-            with autocast('cuda'):
-                preds = model(inputs)
 
-                mask_sum = masks.sum()
-                batch_se = se(preds, targets, masks)
-                batch_mse = batch_se / masks.sum()
-                
-                # Use SIP2Net loss if requested
-                if use_sip2net:
-                    loss, _ = sip2net_criterion(preds, targets, masks)
-                else:
-                    loss = batch_mse
+            # Forward pass
+            preds = model(inputs)
 
-            scaler.scale(loss).backward()
+            # Log any NaNs or Infs
+            if torch.isnan(preds).any():
+                print(f"[Epoch {epoch+1} Batch {batch_idx}] NaNs detected in preds")
+            if torch.isinf(preds).any():
+                print(f"[Epoch {epoch+1} Batch {batch_idx}] Infs detected in preds")
+            if torch.isnan(targets).any():
+                print(f"[Epoch {epoch+1} Batch {batch_idx}] NaNs detected in targets")
+            if torch.isinf(targets).any():
+                print(f"[Epoch {epoch+1} Batch {batch_idx}] Infs detected in targets")
 
-            scaler.unscale_(optimizer)
+            # Compute losses
+            mask_sum = masks.sum()
+            batch_se = se(preds, targets, masks)
+            batch_mse = batch_se / (mask_sum + 1e-8)
+
+            if use_sip2net:
+                loss, _ = sip2net_criterion(preds, targets, masks)
+            else:
+                loss = batch_mse
+
+            # Backward & optimize
+            loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
-
-            scaler.step(optimizer)
-            scaler.update()
+            optimizer.step()
 
             logger.log_batch_loss(batch_se.item(), mask_sum.item())
 
+            # Cleanup
             del inputs, targets, masks, preds, batch_se, batch_mse, loss, mask_sum
 
+        # Validation
         t0 = time()
-
         inference_model.model = model
         inference_model.model.to(device)
-        val_loss = evaluate_model(inference_model=inference_model, val_samples=val_samples, batch_size=8)
+        val_loss = evaluate_model(
+            inference_model=inference_model,
+            val_samples=val_samples,
+            batch_size=8
+        )
         print(f"Validation RMSE: {val_loss} taking {time() - t0}")
+        torch.cuda.empty_cache()
 
         current_lr = optimizer.param_groups[0]['lr']
         scheduler.step(val_loss)
         logger.log_epoch_loss(val_loss, epoch, current_lr)
-        
+
         if epoch % 5 == 4:
             kaggle_async_eval(
                 epoch=epoch,

@@ -53,7 +53,7 @@ class ASPPModule(nn.Module):
 
 
 class UNetModel(nn.Module):
-    def __init__(self, n_channels=7):
+    def __init__(self, n_channels=9):
         super(UNetModel, self).__init__()
         
         self.unet = smp.Unet(
