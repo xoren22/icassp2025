@@ -175,6 +175,25 @@ def split_data_task2(inputs_list: List[RadarSampleInputs], val_freqs, split_save
             )
     return train_inputs, val_inputs
 
+def split(inputs_list: List[RadarSampleInputs], val_freqs=1, split_save_path=None):
+    val_freqs = val_freqs if isinstance(val_freqs, list) else [val_freqs]
+    val_freq_all = [f for f in inputs_list if f.ids[2] in val_freqs]
+    val_freq_train, val_freq_val = split_data_task1(val_freq_all)
+    train_inputs = [f for f in inputs_list if f.ids[2] not in val_freqs]
+
+    val_inputs = val_freq_val 
+    train_inputs = train_inputs + val_freq_train
+
+    if split_save_path:
+        with open(split_save_path, "wb") as fp:
+            pkl.dump({
+                "train_inputs": train_inputs, 
+                "val_inputs": val_inputs,
+                "val_freqs": val_freqs}, fp
+            )
+    return train_inputs, val_inputs
+
+
 def plot_before_after(matrix_before, matrix_after, figsize=(12, 5)):
     fig, axes = plt.subplots(1, 2, figsize=figsize)
     
@@ -188,6 +207,7 @@ def plot_before_after(matrix_before, matrix_after, figsize=(12, 5)):
     
     plt.tight_layout()
     return fig, axes
+
 
 def calculate_distance(x_ant, y_ant, H, W, pixel_size, min_dist_m=0.125):
     y_grid, x_grid = torch.meshgrid(

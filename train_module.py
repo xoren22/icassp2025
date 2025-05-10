@@ -39,8 +39,8 @@ def evaluate_model(inference_model, val_samples, batch_size):
 
     return val_rmse
 
-def evaluate_model(inference_model, val_samples, batch_size):
-    return 14.0**0.5 + 1 / time()
+# def evaluate_model(inference_model, val_samples, batch_size):
+#     return 14.0**0.5 + 1 / time()
 
 def train_model(model,
                 train_loader,
