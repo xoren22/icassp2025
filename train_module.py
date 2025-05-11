@@ -88,10 +88,6 @@ def train_model(model,
             batch_se = se(preds, targets, masks)
             loss = batch_mse = batch_se / (mask_sum + 1e-8)
 
-            if epoch > 4 and batch_mse > 0.5:    # pick a cutoff well above your normal ~1e-3
-                print(f"[SPIKE] Epoch {epoch+1} Batch {batch_idx}  MSE={batch_mse:.3f}  IDs={sample_ids}")
-                continue
-
             # Backward & optimize
             loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
