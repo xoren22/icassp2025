@@ -97,7 +97,7 @@ def main():
     )
     
     train_dataset = PathlossDataset(inputs_list=train_files, augmentations=augmentations)
-    train_loader = DataLoader(train_dataset, batch_size=args.batch_size, shuffle=True, num_workers=args.num_workers)
+    train_loader = DataLoader(train_dataset, batch_size=args.batch_size, shuffle=True, num_workers=args.num_workers, drop_last=True)
     
     model = UNetModel().to(device)
     

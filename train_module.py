@@ -52,22 +52,18 @@ def train_model(model,
                 logger,
                 device=None,
                 use_sip2net=False,
-                sip2net_params={}):
+                sip2net_params={}
+    ):
     os.makedirs(save_dir, exist_ok=True)
     model.to(device)
     best_loss = float('inf')
     inference_model = PathlossPredictor(model=model)
 
-    # Setup SIP2Net loss if requested
-    if use_sip2net:
-        print("Using SIP2Net loss")
-        sip2net_criterion = create_sip2net_loss(use_mse=True, **sip2net_params)
-
     for epoch in range(num_epochs):
         print(f'Epoch {epoch+1}/{num_epochs}\n{"-"*10}')
         model.train()
 
-        for batch_idx, (inputs, targets, masks) in enumerate(tqdm(train_loader), start=1):
+        for batch_idx, (inputs, targets, masks, sample_ids) in enumerate(tqdm(train_loader), start=1):
             inputs = inputs.to(device)
             targets = targets.to(device)
             masks = masks.to(device)
@@ -89,12 +85,11 @@ def train_model(model,
             # Compute losses
             mask_sum = masks.sum()
             batch_se = se(preds, targets, masks)
-            batch_mse = batch_se / (mask_sum + 1e-8)
+            loss = batch_mse = batch_se / (mask_sum + 1e-8)
 
-            if use_sip2net:
-                loss, _ = sip2net_criterion(preds, targets, masks)
-            else:
-                loss = batch_mse
+            if epoch > 4 and batch_mse > 0.5:    # pick a cutoff well above your normal ~1e-3
+                print(f"[SPIKE] Epoch {epoch+1} Batch {batch_idx}  MSE={batch_mse:.3f}  IDs={sample_ids}")
+                continue
 
             # Backward & optimize
             loss.backward()

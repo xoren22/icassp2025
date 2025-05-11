@@ -97,4 +97,4 @@ class PathlossDataset(Dataset):
         output_tensor = sample.output_img / OUTPUT_SCALER # normalizing the output
         mask = sample.mask
 
-        return input_tensor, output_tensor, mask   
+        return input_tensor, output_tensor, mask, sample.ids  

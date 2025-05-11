@@ -292,7 +292,7 @@ def _calculate_transmittance_loss_numpy(transmittance_matrix, x_ant, y_ant, n_an
 
     return output
 
-def calculate_transmittance_loss(transmittance_matrix, x_ant, y_ant, n_angles=360*1, radial_step=1.0, max_walls=10, smooth=True):
+def calculate_transmittance_loss(transmittance_matrix, x_ant, y_ant, n_angles=360*128, radial_step=1.0, max_walls=10, smooth=True):
     transmittance_np = transmittance_matrix.cpu().numpy()
     output_np = _calculate_transmittance_loss_numpy(transmittance_np, x_ant, y_ant, n_angles, radial_step, max_walls)
     if smooth:
