@@ -4,10 +4,11 @@ import torch
 import numpy as np
 from time import time
 from tqdm import tqdm
+from copy import deepcopy
 from torchvision.io import read_image
 
+from loss import se
 from inference import PathlossPredictor
-from loss import se, create_sip2net_loss
 from kaggle_eval import kaggle_async_eval
 
 
@@ -118,11 +119,14 @@ def train_model(model,
         logger.log_epoch_loss(val_loss, epoch, current_lr)
 
         if epoch % 5 == 4:
-            kaggle_async_eval(
-                epoch=epoch,
-                logger=logger,
-                model=inference_model,
-            )
+            eval_model = deepcopy(model).eval()
+            with torch.no_grad():
+                kaggle_async_eval(
+                    epoch=epoch,
+                    logger=logger,
+                    model=PathlossPredictor(model=eval_model)
+                )
+            model.train() 
 
         if val_loss is not None and val_loss < best_loss:
             best_loss = val_loss
