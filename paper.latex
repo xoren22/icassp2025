@@ -1,0 +1,407 @@
+\documentclass{article}
+\usepackage{mlspconf}
+\usepackage{amsmath}
+\usepackage{amssymb}
+\usepackage{booktabs}
+\usepackage{graphicx}
+\usepackage{subfigure}
+\usepackage{multirow}
+\usepackage{hyperref}
+\usepackage{url}
+\usepackage{enumitem}
+\usepackage{balance}
+\usepackage{bbm}
+\usepackage{cleveref}
+
+\title{Physics-Informed U-Net for Indoor Pathloss Prediction from Sparse Measurements}
+
+\name{%
+  \begin{tabular}{@{}c@{\quad}c@{}}
+    Khoren Petrosyan\,$^*$\,$^\dagger$ & Rafayel Mkrtchyan\,$^*$\,$^\dagger$ \\
+    Hrant Khachatrian\,$^*$\,$^\dagger$ & Theofanis P. Raptis\,$^\ddagger$
+  \end{tabular}
+}
+
+\address{%
+  $^*$Yerevan State University, Yerevan, Armenia.\\
+  Email: \{\href{mailto:khorenpetrosyan@ysu.am}{khorenpetrosyan},
+         \href{mailto:rafayel.mkrtchyan@ysu.am}{rafayel.mkrtchyan},
+         \href{mailto:hrant.khachatrian@ysu.am}{hrant.khachatrian}\}@ysu.am\\
+  $^\dagger$YerevaNN, Yerevan, Armenia\\
+  $^\ddagger$Institute of Informatics and Telematics, National Research Council, Pisa, Italy.\\
+  Email: \href{mailto:theofanis.raptis@iit.cnr.it}{theofanis.raptis@iit.cnr.it}
+}
+
+\ninept
+\begin{document}
+\maketitle
+
+\begin{abstract}
+This work was conducted in the context of the MLSP 2025 Sampling-Assisted Pathloss Radio Map Prediction Data Competition. We propose a physics-aware feature engineering approach combined with a U-Net architecture featuring ResNet-34 encoder and Atrous Spatial Pyramid Pooling (ASPP) module to reconstruct indoor pathloss maps from extremely sparse ground-truth samples (0.02\% and 0.5\% sampling rates). Our method transforms the three-channel input into eight physics-informed channels incorporating free-space pathloss, cumulative transmittance losses, log-distance from the antenna, and a binary padding mask. Through a combination of geometric augmentations and multi-scale feature extraction, we achieve competitive performance across both uniform and strategic sampling scenarios. The model attains a weighted RMSE of 5.19 dB, while maintaining inference times of approximately 100ms per map including preprocessing—orders of magnitude faster than ray-tracing baselines.
+\end{abstract}
+
+\begin{keywords}
+Pathloss radio map prediction, deep learning, U-Net.
+\end{keywords}
+
+\section{Introduction}
+\label{sec:intro}
+
+Recent advancements in machine learning have significantly accelerated the development of solutions to radio frequency (RF)-related challenges. These challenges encompass a broad range of tasks, including wireless device localization \cite{KHACHATRIAN2025103696,loc1,loc2,loc3,loc4}, environmental reconstruction \cite{reconstructioniwcmc,JIAN20209554}, and radio map prediction \cite{indoorpathloss4,indoorpathloss7,outdoorpathloss2,outdoorpathloss3,mkrtchyan2025vision,pathlossunet,pathlosstransformer}. The integration of data-driven methods has enabled the modeling of complex spatial and signal propagation patterns, which are otherwise difficult to capture using traditional analytical approaches. A diverse range of neural architectures has been explored for these tasks, from convolutional neural networks (CNNs), which effectively model local spatial dependencies, to vision transformers, which offer enhanced capacity for modeling long-range interactions. These models have demonstrated promising performance across both indoor and outdoor scenarios, marking a significant step forward in the application of deep learning to RF signal processing. In this paper, we focus on the task of indoor pathloss radio map prediction, assuming access to known pathloss measurements at a limited number of spatial locations. 
+
+Accurate prediction of large-scale pathloss (PL) within buildings is essential for access point placement, channel-aware scheduling, and localization services. Traditional approaches rely on either empirical models, which lack accuracy in complex indoor environments, or deterministic methods like ray tracing, which provide high fidelity but require hours of computation per map. The emergence of data-driven methods offers a promising middle ground, potentially achieving near ray-tracing accuracy with dramatically reduced computational cost.
+
+Traditional analytical models often fall short in capturing complex propagation effects, requiring considerable manual tuning and empirical calibration. Recent studies, such as \cite{nguyen2023deep}, highlight the superior performance of deep learning models for pathloss estimation, while \cite{zhang2019path} demonstrates that classical log-distance models are outperformed by learning-based methods, including neural networks and statistical regressors. Although statistical models provide rough estimates by assuming monotonic signal decay with distance, their predictions can be significantly improved using neural networks \cite{feng2025ipp}. Furthermore, while ray-tracing methods deliver high accuracy, they are computationally expensive, making deep learning-based solutions a more efficient alternative \cite{pathlosstransformer}.
+
+The \textbf{Sampling-Assisted Pathloss Radio Map Prediction Data Competition} of IEEE MLSP 2025 \cite{challenge2025} addresses a critical real-world scenario: reconstructing complete indoor radio maps from minimal field measurements. This reflects practical deployment constraints where exhaustive measurements are infeasible. Participants must predict pathloss values across entire building floors using only 0.02\% to 0.5\% of ground-truth samples, combined with environmental information encoded as RGB images representing material properties and distances.
+
+Building on our prior work \cite{mkrtchyan2025vision}, where vision transformers (ViTs) were employed for the first indoor pathloss radio map prediction challenge \cite{bakirtzis2025first}, we adopt a different strategy in this study by leveraging CNNs. CNNs offer greater computational efficiency and are particularly well-suited for scenarios with limited training data. While large transformer-based models can effectively learn complex representations given sufficient data, our current setting requires careful and deliberate feature engineering. Under these constraints, CNNs demonstrate strong performance by utilizing the engineered features to produce accurate and reliable pathloss predictions.
+
+Our solution employs deep learning with physics-aware feature engineering to address the challenge of pathloss radio map prediction. We transform the provided input channels into an eight-channel representation that captures electromagnetic propagation physics, including free-space pathloss, cumulative transmittance losses, log-distance from the antenna, and a binary mask of padded pixels. This physics-informed representation is processed through a U-Net architecture with ResNet-34 encoder combined with an ASPP module. 
+
+Our approach achieved the following quantitative results on the competition evaluation set:
+\begin{itemize}
+    \item Task 1 (uniform sampling): RMSE of 6.42 dB (0.02\%) and 4.01 dB (0.5\%)
+    \item Task 2 (strategic sampling): RMSE of 6.65 dB (0.02\%) and 3.63 dB (0.5\%)
+    \item Final weighted score: 5.19 dB RMSE
+    \item Inference time: approximately 100ms per map including preprocessing
+\end{itemize}
+
+The key contributions of this work include: (1) a physics-aware feature engineering approach that significantly improves prediction accuracy, (2) an effective architecture combining U-Net with ASPP for indoor propagation modeling, (3) a comprehensive augmentation strategy that preserves physical relationships while improving generalization, and (4) a distance-weighted sampling approach for optimal measurement placement.
+
+This paper is organized as follows: Section~\ref{sec:setup} describes the challenge dataset and evaluation protocol; Section~\ref{sec:method} details our methodology including feature engineering, network architecture, and training strategy; Section~\ref{sec:results} presents experimental results with ablation studies and computational analysis and then discusses key findings and limitations; and Section~\ref{sec:conclusion} concludes with future directions.
+
+\section{Related Works}
+
+A variety of approaches have been developed to address the challenge of pathloss prediction in both indoor and outdoor settings \cite{6165627,oladimeji_propagation_2022}. Among these, convolutional encoder-decoder architectures have shown considerable promise, effectively modeling spatial dependencies necessary for accurate radio signal attenuation estimation \cite{qiu2023deep,lee2024scalable}.
+
+The method presented in \cite{pathlossunet} introduces a UNet-based architecture tailored for efficient radio map generation in urban environments, particularly accounting for the mobility of base stations and user equipment. Similarly, the work in \cite{outdoorpathloss3} employs a SegNet-based model to address the complexities of outdoor pathloss estimation. In \cite{outdoorpathloss2}, the authors incorporate a line-of-sight (LoS) map as an additional input feature, representing a feature engineering strategy that proves especially valuable in scenarios where labeled data is scarce.
+
+In the context of indoor radio map prediction, the top-performing solution of the first indoor pathloss prediction challenge \cite{bakirtzis2025first} SIP2Net utilized a UNet-style architecture combined with a custom loss function to achieve superior results \cite{lu2025sip2net}. Another competitive method, IPP-Net \cite{feng2025ipp}, enhanced model performance through the integration of building-specific features such as the number of walls separating the transmitter from each spatial location. A notable alternative, TransPathNet \cite{indoorpathloss4}, approaches indoor pathloss estimation using a two-stage framework, where an initial coarse prediction is subsequently refined by a secondary network to improve spatial resolution and signal-level accuracy.
+
+The task of pathloss radio map prediction becomes particularly compelling when only sparse measurement data, typically obtained through field surveys, is available. In \cite{zeng2025meta}, the authors address this challenge using a meta-learning framework. Their approach involves partitioning the target area into a $100 \times 100$ grid and subsequently refining the pathloss predictions using sparse measurements. Similarly, the authors of \cite{li2022sparse} leverage synthetic datasets generated via ray-tracing simulations to pre-train a pathloss prediction model, which is then fine-tuned with limited real measurement data to enhance generalization.
+
+Motivated by these studies, we introduce a U-Net-based convolutional encoder-decoder architecture tailored for indoor pathloss prediction with sparse supervision. To compensate for the limited availability of data, we incorporate manually engineered, physics-informed features into the model's input representation, thereby guiding the learning process with domain-relevant priors.
+
+\section{Challenge Setup}
+\label{sec:setup}
+
+\subsection{Dataset Description}
+
+The organizers provide the Indoor Radio Map Dataset \cite{dataset2024} generated using the Ranplan Wireless ray-tracer, a commercial-grade propagation simulator. The dataset exhibits significant diversity in building layouts, ranging from simple few-rectangle structures to complex multi-room environments with varying wall materials and thicknesses.
+
+The dataset comprises:
+\begin{itemize}
+    \item \textbf{Training set:} 25 buildings with 50 transmitter positions each across 3 frequencies (868 MHz, 1.8 GHz, 3.5 GHz), totaling 3,750 radio maps. \textbf{We utilized the complete training dataset across all three frequencies}, leveraging cross-frequency patterns to improve generalization.
+    \item \textbf{Test set:} 5 unseen buildings with 50 transmitter positions at 868 MHz only, totaling 250 radio maps
+    \item \textbf{Spatial resolution:} 0.25m × 0.25m per pixel
+    \item \textbf{Transmitter height:} 1.5m above floor level
+    \item \textbf{Pathloss range:} 13-160 dB
+\end{itemize}
+
+Each radio map is paired with a three-channel input image where:
+\begin{itemize}
+    \item \textbf{Channel 1:} Normal incidence reflectance coefficients (0 for air)
+    \item \textbf{Channel 2:} Normal incidence transmittance coefficients (0 for air)
+    \item \textbf{Channel 3:} Euclidean distance from transmitter to each grid point in meters
+\end{itemize}
+
+
+\subsection{Competition Tasks}
+
+\textbf{Task 1 - Uniform Sampling:} The organizers randomly select measurement locations following a uniform distribution. This represents an unbiased baseline where no prior knowledge influences sampling decisions.
+
+\textbf{Task 2 - Strategic Sampling:} Participants select measurement locations themselves, enabling exploration of intelligent sampling strategies that could minimize reconstruction error.
+
+For both tasks, the number of samples is determined by:
+\begin{equation*}
+|\mathcal{S}_n| = \Bigl\lceil \frac{r \cdot W_n \cdot H_n}{100} \Bigr\rceil
+\end{equation*}
+where $r \in \{0.02, 0.5\}$ represents the sampling percentage, and $W_n$, $H_n$ are the map dimensions and $n$ is the sample index.
+
+\subsection{Evaluation Protocol}
+
+Performance is measured using root mean-square error (RMSE) computed exclusively over unsampled locations:
+\begin{equation*}\label{eq:rmse}
+\resizebox{\columnwidth}{!}{%
+  $\displaystyle
+    \mathrm{RMSE}
+      = \sqrt{\frac{1}{\sum_{n\in\mathcal{T}}(W_nH_n-|\mathcal{S}_n|)}
+        \sum_{n\in\mathcal{T}}\sum_{i,j}
+        \mathbbm{1}_{\{(i,j)\notin\mathcal{S}_n\}}
+        (\tilde P_L^{(n)}(i,j)-P_L^{(n)}(i,j))^2
+      }$
+}
+\end{equation*}
+where $\mathcal{T}$ denotes the test set, $n$ indexes individual radio maps, $(W_n, H_n)$ are the map dimensions, $\mathcal{S}_n$ contains the sampled locations, $\mathbbm{1}_{\{\cdot\}}$ is the indicator function, $\tilde{P}_L^{(n)}(i,j)$ is the predicted pathloss at pixel $(i,j)$, and $P_L^{(n)}(i,j)$ is the ground-truth value from ray-tracing.
+
+The final leaderboard score combines four sub-task scores:
+\begin{equation*}
+\text{Final} = 0.3 \, (\text{RMSE}_{\text{T1A}} + \text{RMSE}_{\text{T1B}}) + 0.2 \, (\text{RMSE}_{\text{T2A}} + \text{RMSE}_{\text{T2B}})
+\end{equation*}
+
+This weighting scheme emphasizes Task 1 (60\%) over Task 2 (40\%), reflecting the importance of strong baseline performance before optimization through strategic sampling.
+
+\section{Methodology}
+\label{sec:method}
+
+\subsection{Physics-Aware Feature Engineering}
+
+Our approach transforms the basic three-channel input into a rich eight-channel representation crucial for achieving competitive performance. As part of size normalization, each input is uniformly scaled and zero-padded to 640×640, yielding a binary mask of padded pixels as one feature channel.
+
+\subsubsection{Free-Space Pathloss with Antenna Patterns}
+
+The free-space pathloss (FSPL) provides a fundamental baseline for signal attenuation. We compute:
+\begin{equation*}
+\text{PL}_{\text{FS}} = 20\log_{10}(d) + 20\log_{10}(f) - 27.55
+\end{equation*}
+where $d$ is the distance clamped to minimum 0.125m to avoid singularities, $f$ is the carrier frequency in MHz.
+
+% Figure~\ref{fig:fspl} visualizes the resulting FSPL feature, showing how it captures the distance-based attenuation.
+
+% \begin{figure}[htb]
+%     \centering
+%     \includegraphics[width=0.8\columnwidth]{fspl_feat.png}
+%     \caption{Free-space pathloss feature. Darker regions indicate higher pathloss.}
+%     \label{fig:fspl}
+% \end{figure}
+
+\subsubsection{Cumulative Transmittance Loss}
+
+Beyond free-space propagation, indoor environments introduce additional losses through wall penetration. We developed a Numba-accelerated algorithm that traces rays from the transmitter to each grid point, accumulating transmittance losses:
+
+\begin{equation*}
+\text{Loss}_{\text{trans}}(x,y) = \min_{\theta} \sum_{i \in \text{walls}(\theta)} T_i
+\end{equation*}
+
+where $T_i$ represents the transmittance loss of wall $i$ along ray direction $\theta$. The algorithm considers multiple ray angles (360×128) and selects the path with minimum cumulative loss, approximating the dominant propagation path.
+
+Figure~\ref{fig:transmittance} shows the resulting transmittance loss map, clearly delineating regions separated by walls and capturing the additional attenuation from building materials.
+
+\begin{figure}[htb]
+\centering
+\includegraphics[width=0.8\columnwidth]{transmittance_feat.png}
+\caption{Cumulative transmittance loss feature showing additional attenuation through walls. The sharp boundaries correspond to wall locations, with higher losses in regions requiring penetration through multiple walls.}
+\label{fig:transmittance}
+\end{figure}
+
+\subsubsection{Complete Feature Stack}
+
+Our final eight-channel input comprises:
+\begin{enumerate}
+    \item Original reflectance coefficients
+    \item Original transmittance coefficients
+    \item Free-space pathloss with antenna gain
+    \item Frequency channel (log-normalized)
+    \item Cumulative transmittance loss
+    \item The sparse measurements
+    \item Log-distance from the antenna
+    \item Binary mask of padded pixels
+\end{enumerate}
+
+This physics-informed representation enables the network to leverage domain knowledge about electromagnetic propagation while learning complex, environment-specific variations, and also facilitates physics-aware augmentations that maintain propagation consistency.
+
+\section{Network Architecture}
+\label{sec:architecture}
+
+\begin{figure*}
+    \centering
+    \includegraphics[width=0.9\textwidth,trim={0cm 1.7cm 0cm 0cm},clip]{PL_UNet.pdf}
+    \caption{Model architecture.}
+    \label{fig:architecture}
+\end{figure*}
+
+\begin{figure}
+    \centering
+    \includegraphics[width=\linewidth,trim={1.3cm 2.5cm 3cm 1.3cm},clip]{ASPP.pdf}
+    \caption{The architecture of the ASPP module of the network.}
+    \label{fig:aspp}
+\end{figure}
+
+\subsubsection{Encoder Design}
+
+The encoder uses a randomly initialized ResNet-34 backbone, modified to accept \textbf{8} input channels. The deep residual architecture provides several advantages:
+\begin{itemize}
+    \item Strong feature extraction capabilities from pretrained weights
+    \item Effective gradient flow through residual connections
+    \item Multi-scale feature hierarchy from different stages
+\end{itemize}
+
+\subsubsection{ASPP Module}
+
+At the bottleneck, we integrate an Atrous Spatial Pyramid Pooling (ASPP) module with parallel branches:
+\begin{itemize}
+    \item 1×1 convolution for local features
+    \item 3×3 convolutions with dilation rates {6, 12, 18}
+    \item Global average pooling for scene-level context
+\end{itemize}
+
+This multi-scale processing proves crucial for capturing both local wall interactions and long-range propagation effects. The different dilation rates allow the network to aggregate information across various spatial extents without losing resolution.
+
+\subsubsection{Decoder and Output}
+
+The decoder follows standard U-Net design with skip connections from corresponding encoder layers. The final layer produces single-channel pathloss predictions in dB.
+
+\section{Data Augmentation Strategy}
+
+We apply geometric and physics-based augmentations that preserve physical relationships while increasing training data diversity:
+
+\textbf{Rotation augmentation} includes both continuous rotations in $[-30°, 30°]$ and discrete cardinal rotations. For continuous rotations, we update:
+\begin{itemize}
+    \item Antenna position using bilinear interpolation
+    \item All feature channels using appropriate interpolation
+\end{itemize}
+
+\textbf{Distance scaling} by factors in $[1/1.5, 1.5]$ requires adjusting the FSPL:
+\begin{equation*}
+\Delta\text{PL} = 20\log_{10}(s)
+\end{equation*}
+where $s$ is the scale factor. This maintains physical consistency between distance and pathloss.
+
+\textbf{Synthetic wall insertion} augments the training data with additional structural complexity. We randomly insert vertical and horizontal walls with transmittance values, then recalculate the pathloss accordingly:
+\begin{itemize}
+    \item Wall positions and transmittance values are randomly sampled
+    \item Cumulative transmittance loss is recomputed for affected regions
+    \item Output pathloss values are adjusted based on the new propagation paths
+\end{itemize}
+This physics-aware augmentation helps the model generalize to buildings with varying wall densities and configurations.
+
+\textbf{Flipping operations} (horizontal/vertical) are applied to increase spatial diversity.
+
+All geometric augmentations are applied with 50\% probability during training, while wall insertion is applied independently, significantly improving generalization to unseen building geometries and structural variations.
+
+\section{Strategic Sampling Algorithm}
+
+For Task 2, we developed a distance-weighted sampling strategy based on the observation that pathloss uncertainty typically increases with distance from the transmitter. The algorithm operates in three stages:
+
+\begin{enumerate}
+    \item \textbf{Probability computation:} Each location's sampling probability is proportional to $d^{\alpha}$ where $d$ is the distance from transmitter and $\alpha=2$
+    
+    \item \textbf{Spatial separation enforcement:} Selected points must maintain minimum separation of $0.5\sqrt{HW/N}$ to ensure coverage
+    
+    \item \textbf{Greedy selection with fallback:} Points are selected greedily from oversampled candidates; if constraints cannot be satisfied, remaining points are drawn from the residual distribution
+\end{enumerate}
+
+This approach aims to balance exploration of high-uncertainty regions (far from transmitter) with adequate spatial coverage throughout the building. We observe modest to no gains from strategic sampling using this algorithm.
+
+\section{Training Configuration}
+
+Our training strategy employs several techniques to ensure robust convergence:
+
+\textbf{Data splitting:} out of 25 buildings 22 are randomly chosen for training, and 3 for validation, maintaining complete building separation to assess generalization.
+
+\textbf{Multi-frequency training:} We trained on the complete dataset spanning all three frequencies (868 MHz, 1.8 GHz, 3.5 GHz), despite testing only on 868 MHz. This multi-frequency training provides several benefits:
+\begin{itemize}
+    \item Increased training data volume (3,750 vs. 1,250 samples)
+    \item Implicit regularization through frequency diversity
+    \item Learning of frequency-invariant propagation patterns
+\end{itemize}
+The frequency information is explicitly provided as an input channel, enabling the model to learn frequency-dependent adjustments while leveraging shared propagation physics across frequencies.
+
+\textbf{Optimization details:}
+\begin{itemize}
+    \item Adam optimizer with $\beta_1=0.9$, $\beta_2=0.999$
+    \item Constant learning rate of $3 \times 10^{-4}$
+\end{itemize}
+
+\textbf{Loss function:} MSE computed only over unsampled locations:
+\begin{equation*}
+\mathcal{L} = \frac{1}{|\mathcal{U}|}\sum_{(i,j) \in \mathcal{U}} (\hat{y}_{ij} - y_{ij})^2
+\end{equation*}
+where $\mathcal{U}$ represents unsampled grid points.
+
+\textbf{Implementation details:}
+\begin{itemize}
+    \item Batch size 32 on dual NVIDIA DGX A100 GPUs
+    \item Training for 2000 epochs with early stopping
+    \item Input resolution: 640×640 (resized with nearest neighbor for materials, bilinear for distances)
+\end{itemize}
+
+\section{Results and Analysis}
+\label{sec:results}
+
+%\subsection{Main Results}
+
+Table~\ref{tab:main_results} presents our performance across all competition tasks. The model demonstrates strong results at both sampling rates, with expected improvement as sampling density increases.
+
+\begin{table}[h]
+\centering
+\caption{Competition results showing RMSE (dB) for each task and sampling rate}
+\label{tab:main_results}
+\begin{tabular}{lcccc}
+\toprule
+\multirow{2}{*}{Task} & \multicolumn{2}{c}{RMSE (dB)} & \multirow{2}{*}{Weight} & \multirow{2}{*}{Contribution} \\
+& 0.02\% & 0.5\% & & \\
+\midrule
+Task 1 (Uniform) & 6.42 & 4.01 & 0.3 & 3.15 \\
+Task 2 (Strategic) & 6.65 & 3.63 & 0.2 & 2.04 \\
+\midrule
+\multicolumn{4}{r}{Final Score:} & \textbf{5.19} \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Several key observations emerge:
+\begin{itemize}
+    \item \textbf{Sampling rate impact:} Increasing sampling from 0.02\% to 0.5\% reduces RMSE by 35-45\%, demonstrating the value of even very few additional measurements
+    \item \textbf{Strategic vs uniform:} Our strategic sampling shows modest improvements at 0.5\% (9.5\% reduction) but performs slightly worse at 0.02\%, suggesting the distance-based strategy is most effective with sufficient samples
+    \item \textbf{Consistency:} Similar performance patterns across tasks indicate robust generalization
+\end{itemize}
+
+\subsection{Ablation Studies}
+
+To understand the contribution of different components, we conducted systematic ablations evaluating various architectural choices and feature combinations. Table~\ref{tab:ablations_full} presents the complete ablation results on Task 1 with 0.5\% sampling.
+
+\begin{table}[h]
+\centering
+\caption{Ablation results on Kaggle for Task 1 (0.5 \% sampling)}
+\label{tab:ablations_full}
+\begin{tabular}{ccccc}
+\toprule
+ASPP & FSPL & Trans.\ Loss & MSE (dB) & $\Delta$ vs Best \\
+\midrule
+\checkmark & \checkmark & \checkmark & \textbf{16.4} & -- \\  % best
+$\times$   & \checkmark & \checkmark & 18.7 & +2.3 \\
+\checkmark & $\times$   & \checkmark & 19.0 & +2.6 \\
+$\times$   & $\times$   & \checkmark & 18.9 & +2.5 \\
+\checkmark & \checkmark & $\times$   & 23.1 & +6.7 \\
+\checkmark & $\times$   & $\times$   & 23.8 & +7.4 \\
+$\times$   & $\times$   & $\times$   & 23.6 & +7.2 \\
+$\times$   & \checkmark & $\times$   & 25.7 & +9.3 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\textbf{Key take-aways (brief)}  
+\begin{itemize}[leftmargin=*,noitemsep,topsep=0pt]
+\item Best model uses \emph{all} cues (ASPP\,+\,FSPL\,+\,Trans.) and achieves 16.4 dB.  
+\item Transmittance loss is pivotal: removing it costs $\approx$2–2.6 dB even when other cues remain.  
+\item FSPL and ASPP are complementary—each alone offers minor gains, but together with transmittance loss they cut error by an extra 2.3 dB.  
+\end{itemize}
+
+
+\section{Conclusion}
+\label{sec:conclusion}
+
+We presented a novel approach to indoor pathloss prediction from sparse samples, combining physics-aware feature engineering with modern deep learning architectures. Our solution achieves competitive accuracy (5.19 dB RMSE) while maintaining real-time inference capabilities suitable for practical deployment.
+
+Key contributions include:
+\begin{enumerate}
+    \item Physics-informed feature engineering that explicitly encodes propagation mechanisms
+    \item Effective integration of U-Net with ASPP for multi-scale indoor propagation modeling  
+    \item Comprehensive augmentation strategy preserving physical relationships
+    \item Distance-weighted strategic sampling balancing exploration and coverage
+\end{enumerate}
+
+The strong performance with minimal sampling (0.02-0.5\%) demonstrates the feasibility of accurate radio map prediction with limited measurements, potentially enabling cost-effective deployment of AI-assisted network planning tools. As indoor wireless networks become increasingly dense and complex, such AI-assisted tools could become essential for efficient network planning and optimization due to their favorable speed/accuracy tradeoff. Our code and trained models will be released upon publication at
+\href{https://github.com/YerevaNN/SamplingAssistedPathlossRadioMapPrediction}{github.com/YerevaNN/SamplingAssistedPathlossRadioMapPrediction}
+to facilitate reproducible research and practical adoption of these techniques.
+
+\section*{Acknowledgements}
+The work of K.~Petrosyan, R.~Mkrtchyan and H.~Khachatrian was partly supported by the RA Science Committee grant No. 22rl-052 (DISTAL). The work of T.~Raptis was partly supported by the European Union - Next Generation EU under the Italian National Recovery and Resilience Plan (NRRP), Mission 4, Component 2, Investment 1.3, CUP B53C22003970001, partnership on ``Telecommunications of the Future'' (PE00000001 - program ``RESTART'').
+
+\balance
+\bibliographystyle{IEEEtran}
+\bibliography{refs}
+
+\end{document}
