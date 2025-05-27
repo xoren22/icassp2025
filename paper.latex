@@ -109,6 +109,8 @@ Each radio map is paired with a three-channel input image where:
 
 \subsection{Competition Tasks}
 
+The competition evaluates two distinct sampling strategies:
+
 \textbf{Task 1 - Uniform Sampling:} The organizers randomly select measurement locations following a uniform distribution. This represents an unbiased baseline where no prior knowledge influences sampling decisions.
 
 \textbf{Task 2 - Strategic Sampling:} Participants select measurement locations themselves, enabling exploration of intelligent sampling strategies that could minimize reconstruction error.
@@ -201,8 +203,8 @@ Our final eight-channel input comprises:
 
 This physics-informed representation enables the network to leverage domain knowledge about electromagnetic propagation while learning complex, environment-specific variations, and also facilitates physics-aware augmentations that maintain propagation consistency.
 
-\section{Network Architecture}
-\label{sec:architecture}
+\subsection{Network Architecture}
+
 
 \begin{figure*}
     \centering
@@ -217,6 +219,8 @@ This physics-informed representation enables the network to leverage domain know
     \caption{The architecture of the ASPP module of the network.}
     \label{fig:aspp}
 \end{figure}
+
+We employ a U-Net architecture enhanced with modern deep learning components, as illustrated in \Cref{fig:architecture}.
 
 \subsubsection{Encoder Design}
 
@@ -270,7 +274,7 @@ This physics-aware augmentation helps the model generalize to buildings with var
 
 All geometric augmentations are applied with 50\% probability during training, while wall insertion is applied independently, significantly improving generalization to unseen building geometries and structural variations.
 
-\section{Strategic Sampling Algorithm}
+\subsection{Strategic Sampling Algorithm}
 
 For Task 2, we developed a distance-weighted sampling strategy based on the observation that pathloss uncertainty typically increases with distance from the transmitter. The algorithm operates in three stages:
 
@@ -284,7 +288,7 @@ For Task 2, we developed a distance-weighted sampling strategy based on the obse
 
 This approach aims to balance exploration of high-uncertainty regions (far from transmitter) with adequate spatial coverage throughout the building. We observe modest to no gains from strategic sampling using this algorithm.
 
-\section{Training Configuration}
+\subsection{Training Configuration}
 
 Our training strategy employs several techniques to ensure robust convergence:
 
@@ -400,7 +404,11 @@ to facilitate reproducible research and practical adoption of these techniques.
 \section*{Acknowledgements}
 The work of K.~Petrosyan, R.~Mkrtchyan and H.~Khachatrian was partly supported by the RA Science Committee grant No. 22rl-052 (DISTAL). The work of T.~Raptis was partly supported by the European Union - Next Generation EU under the Italian National Recovery and Resilience Plan (NRRP), Mission 4, Component 2, Investment 1.3, CUP B53C22003970001, partnership on ``Telecommunications of the Future'' (PE00000001 - program ``RESTART'').
 
+
 \balance
+%\clearpage
+%\section*{7. REFERENCES}
+
 \bibliographystyle{IEEEtran}
 \bibliography{refs}
 
