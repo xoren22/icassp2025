@@ -191,111 +191,132 @@ def calculate_combined_loss(
     return out_img
 
 
+import numpy as np
+from numba import njit, prange
+
+# ───────────────────────────────────────────────────────────────
+# helpers
+# ───────────────────────────────────────────────────────────────
+@njit(inline='always')
+def _euclidean_distance(px: int, py: int, x_ant: float, y_ant: float, pixel_size: float = 0.25) -> float:
+    """Pixel-to-antenna distance in the same units as pixel spacing (≈ 0.25 m)."""
+    return np.hypot(px - x_ant, py - y_ant) * pixel_size
+
+@njit(inline='always')
+def _fspl(dist_m: float, freq_MHz: float, min_dist_m: float = 0.125) -> float:
+    """Free-space path-loss in dB, clamped to avoid log(0)."""
+    d = dist_m if dist_m > min_dist_m else min_dist_m
+    return 20.0 * np.log10(d) + 20.0 * np.log10(freq_MHz) - 27.55
+
+# ───────────────────────────────────────────────────────────────
+# transmission-only tracer with FSPL baked in
+# ───────────────────────────────────────────────────────────────
 @njit(parallel=True, fastmath=True, nogil=True, boundscheck=False)
 def calculate_transmission_loss_numpy(
-    transmittance_matrix,
-    x_ant,
-    y_ant,
-    n_angles=360*128,
-    radial_step=1.0,
-    max_walls=10
-):
+    transmittance_matrix: np.ndarray,
+    x_ant: float,
+    y_ant: float,
+    freq_MHz: float,
+    n_angles: int = 360 * 128,
+    radial_step: float = 1.0,
+    max_walls: int = 10
+) -> np.ndarray:
     """
-    Numba-accelerated function that casts 'n_angles' rays from (x_ant, y_ant).
-    On each crossing from positive->zero in transmittance_matrix, we add path-loss
-    to sum_loss. If sum_loss exceeds 160, we clip to 160 and stop the ray.
+    Casts `n_angles` rays from the antenna pixel.  Each time a ray crosses a wall
+    (positive → zero in `transmittance_matrix`) it adds that wall’s loss.
+    After all rays are done, FSPL for every pixel is added in one pass.
     """
-    h, w = transmittance_matrix.shape
-    output  = np.zeros((h, w), dtype=np.float32)
-    counts  = np.zeros((h, w), dtype=np.float32)
+    h,  w  = transmittance_matrix.shape
+    out    = np.zeros((h, w), dtype=np.float32)
+    counts = np.zeros((h, w), dtype=np.float32)   # for averaging overlaps
 
-    dtheta = 2.0 * np.pi / n_angles
-    max_dist = np.sqrt(w*w + h*h)
+    dtheta   = 2.0 * np.pi / n_angles
+    max_dist = np.sqrt(w * w + h * h)
     cos_vals = np.cos(np.arange(n_angles) * dtheta)
     sin_vals = np.sin(np.arange(n_angles) * dtheta)
 
-    for i in range(int(n_angles)):
-        cos_t = cos_vals[i]
-        sin_t = sin_vals[i]
-        sum_loss  = 0.0
-        last_val  = None
-        wall_count = 0
-        r = 0.0
+    for i in range(n_angles):
+        ct, st   = cos_vals[i], sin_vals[i]
+        sum_loss = 0.0
+        last_val = None
+        wall_ct  = 0
+        r        = 0.0
 
         while r <= max_dist:
-            x = x_ant + r * cos_t
-            y = y_ant + r * sin_t
-
+            x = x_ant + r * ct
+            y = y_ant + r * st
             px = int(round(x))
             py = int(round(y))
 
+            # ray outside → step in until inside
             if px < 0 or px >= w or py < 0 or py >= h:
-                # antenna still outside → step forward until we hit the map
                 if last_val is None:
                     r += radial_step
                     continue
-                # already inside → leave as before
                 if last_val > 0:
                     sum_loss += last_val
-                    if sum_loss > 160:
-                        sum_loss = 160
+                    if sum_loss > 160.0:
+                        sum_loss = 160.0
                 break
 
             val = transmittance_matrix[py, px]
             if last_val is None:
                 last_val = val
 
-            # Detect crossing from positive->zero => add last_val
+            # crossing from positive to zero ⇒ add wall loss
             if val != last_val:
                 if last_val > 0 and val == 0:
                     sum_loss += last_val
-                    # If exceeding 160, stop the ray
-                    if sum_loss > 160:
-                        sum_loss = 160
+                    if sum_loss > 160.0:
+                        sum_loss = 160.0
                         break
-                    wall_count += 1
-                    if wall_count >= max_walls:
-                        # fill remainder with sum_loss
-                        r_temp = r
-                        while r_temp <= max_dist:
-                            x_temp = x_ant + r_temp * cos_t
-                            y_temp = y_ant + r_temp * sin_t
-                            px_temp = int(round(x_temp))
-                            py_temp = int(round(y_temp))
-                            if px_temp < 0 or px_temp >= w or py_temp < 0 or py_temp >= h:
+                    wall_ct += 1
+                    if wall_ct >= max_walls:
+                        # fill the rest of the ray with current loss
+                        r_tmp = r
+                        while r_tmp <= max_dist:
+                            x_t = x_ant + r_tmp * ct
+                            y_t = y_ant + r_tmp * st
+                            px_t = int(round(x_t))
+                            py_t = int(round(y_t))
+                            if px_t < 0 or px_t >= w or py_t < 0 or py_t >= h:
                                 break
-                            # average sum_loss into that pixel
-                            if counts[py_temp, px_temp] == 0:
-                                output[py_temp, px_temp] = sum_loss
-                                counts[py_temp, px_temp] = 1
+                            if counts[py_t, px_t] == 0:
+                                out[py_t, px_t] = sum_loss
+                                counts[py_t, px_t] = 1
                             else:
-                                old_val = output[py_temp, px_temp]
-                                old_count = counts[py_temp, px_temp]
-                                output[py_temp, px_temp] = (old_val*old_count + sum_loss) / (old_count+1)
-                                counts[py_temp, px_temp] += 1
-                            r_temp += radial_step
+                                c = counts[py_t, px_t]
+                                out[py_t, px_t] = (out[py_t, px_t] * c + sum_loss) / (c + 1)
+                                counts[py_t, px_t] = c + 1
+                            r_tmp += radial_step
                         break
                 last_val = val
 
-            # Average current sum_loss into (px, py)
+            # write current loss into this pixel (average if hit before)
             if counts[py, px] == 0:
-                output[py, px] = sum_loss
+                out[py, px] = sum_loss
                 counts[py, px] = 1
             else:
-                old_val = output[py, px]
-                old_count = counts[py, px]
-                output[py, px] = (old_val*old_count + sum_loss) / (old_count+1)
-                counts[py, px] += 1
+                c = counts[py, px]
+                out[py, px] = (out[py, px] * c + sum_loss) / (c + 1)
+                counts[py, px] = c + 1
 
-            if wall_count >= max_walls or sum_loss > 160:
-                # Check for 160 limit
-                if sum_loss > 160:
-                    sum_loss = 160
+            if wall_ct >= max_walls or sum_loss >= 160.0:
+                if sum_loss > 160.0:
+                    sum_loss = 160.0
                 break
 
             r += radial_step
 
-    return output
+    # ─ add FSPL for every pixel ─
+    for py in prange(h):
+        for px in range(w):
+            d    = _euclidean_distance(px, py, x_ant, y_ant)
+            fspl = _fspl(d, freq_MHz)
+            total = out[py, px] + fspl
+            out[py, px] = 160.0 if total > 160.0 else total
+
+    return out
 
 
 # ---------------------------------------------------------------------
@@ -303,10 +324,10 @@ def calculate_transmission_loss_numpy(
 # ---------------------------------------------------------------------
 def debug_combined_method(sample):
     ref, trans, dist = sample.input_img.cpu().numpy()
-    x,y = sample.x_ant, sample.y_ant
+    x,y,freq_MHz = sample.x_ant, sample.y_ant, sample.freq_MHz
     fspl = calculate_fspl(dist, sample.freq_MHz)
     comb = calculate_combined_loss(ref, trans, x, y, n_angles=360*128, max_reflections=5, max_transmissions=10)
-    tx   = calculate_transmission_loss_numpy(trans, x, y, n_angles=360*128)
+    tx   = calculate_transmission_loss_numpy(trans, x, y, freq_MHz, n_angles=360*128)
     print("Combined range:", comb.min(), comb.max())
     print("Trans range:  ", tx.min(), tx.max())
     print("Painted pixels diff:", np.sum(comb>0), np.sum(tx>0))
@@ -320,18 +341,18 @@ class Approx:
         self.method = method
     def approximate(self, sample: RadarSample) -> torch.Tensor:
         ref, trans, dist = sample.input_img.cpu().numpy()
-        x,y = sample.x_ant, sample.y_ant
+        x,y,freq_MHz = sample.x_ant, sample.y_ant, sample.freq_MHz
         fspl = calculate_fspl(dist, sample.freq_MHz)
         if self.method=='combined':
             feat = calculate_combined_loss(ref, trans, x, y,
                                            n_angles=360*128,
                                            max_reflections=3,
-                                           max_transmissions=10)
+                                           max_transmissions=10) + fspl
         else:
-            feat = calculate_transmission_loss_numpy(trans, x, y,
+            feat = calculate_transmission_loss_numpy(trans, x, y, freq_MHz,
                                                      n_angles=360*128,
                                                      max_walls=10)
-        out = np.minimum(feat + fspl, 160.0)
+        out = np.minimum(feat, 160.0)
         return torch.from_numpy(np.floor(out))
     def predict(self, samples):
         return [self.approximate(s) for s in tqdm(samples, "predicting")]
@@ -353,7 +374,7 @@ if __name__ == "__main__":
     s0    = samples[0]  
     ref0, trans0, dist0 = s0.input_img.cpu().numpy()[0], s0.input_img.cpu().numpy()[1], s0.input_img.cpu().numpy()[2]  
     # (assuming your channels are [ref, trans, dist]; adjust indexing if needed)  
-    x0, y0 = s0.x_ant, s0.y_ant  
+    x0, y0, freq_MHz = s0.x_ant, s0.y_ant, s0.freq_MHz
     fspl0   = calculate_fspl(dist0, s0.freq_MHz)  
 
     c0 = calculate_combined_loss(  
@@ -363,7 +384,7 @@ if __name__ == "__main__":
         max_transmissions=10  
     )  
     t0 = calculate_transmission_loss_numpy(  
-        trans0, x0, y0,  
+        trans0, x0, y0, freq_MHz,
         n_angles=360*128,  
         radial_step=1.0,  
         max_walls=10  
