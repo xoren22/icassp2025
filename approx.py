@@ -1,59 +1,51 @@
-import os
-import torch
-import numpy as np
-import matplotlib.pyplot as plt
+import os, torch, numpy as np, matplotlib.pyplot as plt
 from tqdm import tqdm
 from numba import njit, prange
-
 from helper import RadarSample, load_samples, compare_two_matrices, rmse, visualize_predictions
 
-# ---------------------------------------------------------------------
-#  FREE‐SPACE PATH LOSS
-# ---------------------------------------------------------------------
+# ───────────────────────────────────────────────────────────────
+#  FREE-SPACE PATH-LOSS (scalar helper used everywhere)
+# ───────────────────────────────────────────────────────────────
 def calculate_fspl(dist_m, freq_MHz, min_dist_m=0.125):
     dist_clamped = np.maximum(dist_m, min_dist_m)
     return 20.0 * np.log10(dist_clamped) + 20.0 * np.log10(freq_MHz) - 27.55
 
-# ---------------------------------------------------------------------
+@njit(inline='always')
+def _fspl(dist_m: float, freq_MHz: float, min_dist_m: float = 0.125) -> float:
+    d = dist_m if dist_m > min_dist_m else min_dist_m
+    return 20.0 * np.log10(d) + 20.0 * np.log10(freq_MHz) - 27.55
+
+# ───────────────────────────────────────────────────────────────
 #  NUMBA HELPERS FOR COMBINED TRACING
-# ---------------------------------------------------------------------
+# ───────────────────────────────────────────────────────────────
 @njit(inline='always')
 def _step_until_wall(mat, x0, y0, dx, dy, radial_step, max_dist):
     h, w = mat.shape
     x, y = x0, y0
     last_val = mat[int(round(y0)), int(round(x0))]
     travelled = 0.0
-
     while travelled <= max_dist:
         x += dx * radial_step
         y += dy * radial_step
         travelled += radial_step
-
-        px = int(round(x))
-        py = int(round(y))
+        px = int(round(x)); py = int(round(y))
         if px < 0 or px >= w or py < 0 or py >= h:
             return -1, -1, travelled, last_val, last_val
-
         cur_val = mat[py, px]
         if cur_val != last_val:
             return px, py, travelled, last_val, cur_val
-
     return -1, -1, travelled, last_val, last_val
 
 @njit(inline='always')
 def _estimate_normal(refl_mat, px, py):
-    h, w = refl_mat.shape
-    val = refl_mat[py, px]
+    h, w = refl_mat.shape; val = refl_mat[py, px]
     nx = 0.0; ny = 0.0
     if px > 0   and refl_mat[py, px-1] != val: nx -= 1.0
     if px < w-1 and refl_mat[py, px+1] != val: nx += 1.0
     if py > 0   and refl_mat[py-1, px] != val: ny -= 1.0
     if py < h-1 and refl_mat[py+1, px] != val: ny += 1.0
-
-    norm = np.hypot(nx, ny)
-    if norm == 0.0:
-        return 0.0, 0.0
-    return nx / norm, ny / norm
+    nrm = np.hypot(nx, ny)
+    return (0.0, 0.0) if nrm == 0.0 else (nx/nrm, ny/nrm)
 
 @njit(inline='always')
 def _reflect_dir(dx, dy, nx, ny):
@@ -61,37 +53,39 @@ def _reflect_dir(dx, dy, nx, ny):
     rx = dx - 2.0*dot*nx
     ry = dy - 2.0*dot*ny
     mag = np.hypot(rx, ry)
-    if mag == 0.0:
-        return -dx, -dy
-    return rx/mag, ry/mag
+    return (-dx, -dy) if mag == 0.0 else (rx/mag, ry/mag)
 
-# ---------------------------------------------------------------------
-#  PAINT‐TO‐EDGE FALLBACK
-# ---------------------------------------------------------------------
-
+# ───────────────────────────────────────────────────────────────
+#  PAINT-TO-EDGE FALLBACK  (FSPL included)
+# ───────────────────────────────────────────────────────────────
 @njit(inline='always')
-def _paint_to_edge(out_img, x0, y0, dx, dy, acc_loss, radial_step, max_dist):
+def _paint_to_edge(out_img, x0, y0, dx, dy,
+                   acc_loss, path_px,
+                   pixel_size, freq_MHz,
+                   radial_step, max_dist, max_loss):
     h, w = out_img.shape
     r = 0.0
     while r <= max_dist:
-        ix = int(round(x0 + dx*r))
-        iy = int(round(y0 + dy*r))
+        ix = int(round(x0 + dx*r)); iy = int(round(y0 + dy*r))
         if ix < 0 or ix >= w or iy < 0 or iy >= h:
             return
-        if acc_loss < out_img[iy, ix]:
-            out_img[iy, ix] = acc_loss
+        fspl = _fspl((path_px + r) * pixel_size, freq_MHz)
+        tot  = acc_loss + fspl
+        if tot < out_img[iy, ix]:
+            out_img[iy, ix] = tot if tot < max_loss else max_loss
         r += radial_step
 
-# ---------------------------------------------------------------------
-#  RECURSIVE TRACER
-# ---------------------------------------------------------------------
-
+# ───────────────────────────────────────────────────────────────
+#  RECURSIVE TRACER  (FSPL added every step)
+# ───────────────────────────────────────────────────────────────
 @njit
 def _trace_ray_recursive(
     refl_mat, trans_mat, out_img,
     x0, y0, dx, dy,
     trans_ct, refl_ct,
-    acc_loss,
+    acc_loss,          # wall / reflection loss only
+    path_px,           # cumulative distance in pixels
+    pixel_size, freq_MHz,
     radial_step, max_dist,
     max_trans, max_refl,
     max_loss
@@ -103,68 +97,78 @@ def _trace_ray_recursive(
         refl_mat, x0, y0, dx, dy, radial_step, max_dist
     )
 
-    # paint the free‐space segment
+    # paint free-space segment with FSPL
     steps = int(travelled / radial_step) + 1
     for s in range(steps):
         xi = x0 + dx * radial_step * s
         yi = y0 + dy * radial_step * s
-        ix = int(round(xi))
-        iy = int(round(yi))
+        ix = int(round(xi)); iy = int(round(yi))
         if ix < 0 or ix >= out_img.shape[1] or iy < 0 or iy >= out_img.shape[0]:
             break
-        if acc_loss < out_img[iy, ix]:
-            out_img[iy, ix] = acc_loss
+        fspl = _fspl((path_px + radial_step*s) * pixel_size, freq_MHz)
+        tot  = acc_loss + fspl
+        if tot < out_img[iy, ix]:
+            out_img[iy, ix] = tot if tot < max_loss else max_loss
 
     # exited image?
     if px_hit < 0:
         return
 
-    # —— transmission branch ——
+    new_path_px = path_px + travelled
+
+    # transmission branch
     if trans_ct < max_trans:
-        new_loss = acc_loss + trans_mat[py_hit, px_hit]
         _trace_ray_recursive(
             refl_mat, trans_mat, out_img,
             px_hit, py_hit, dx, dy,
             trans_ct+1, refl_ct,
-            new_loss,
+            acc_loss + trans_mat[py_hit, px_hit],
+            new_path_px,
+            pixel_size, freq_MHz,
             radial_step, max_dist,
             max_trans, max_refl,
             max_loss
         )
     else:
         _paint_to_edge(out_img, px_hit, py_hit, dx, dy,
-                       acc_loss, radial_step, max_dist)
+                       acc_loss, new_path_px,
+                       pixel_size, freq_MHz,
+                       radial_step, max_dist, max_loss)
 
-    # —— reflection branch ——
+    # reflection branch
     if refl_ct < max_refl:
         nx, ny = _estimate_normal(refl_mat, px_hit, py_hit)
         if nx != 0.0 or ny != 0.0:
             rdx, rdy = _reflect_dir(dx, dy, nx, ny)
-            new_loss = acc_loss + refl_mat[py_hit, px_hit]
             _trace_ray_recursive(
                 refl_mat, trans_mat, out_img,
                 px_hit, py_hit, rdx, rdy,
                 trans_ct, refl_ct+1,
-                new_loss,
+                acc_loss + refl_mat[py_hit, px_hit],
+                new_path_px,
+                pixel_size, freq_MHz,
                 radial_step, max_dist,
                 max_trans, max_refl,
                 max_loss
             )
     else:
         _paint_to_edge(out_img, px_hit, py_hit, dx, dy,
-                       acc_loss, radial_step, max_dist)
+                       acc_loss, new_path_px,
+                       pixel_size, freq_MHz,
+                       radial_step, max_dist, max_loss)
 
-# ---------------------------------------------------------------------
+# ───────────────────────────────────────────────────────────────
 #  PUBLIC ENTRY-POINT
-# ---------------------------------------------------------------------
-
+# ───────────────────────────────────────────────────────────────
 @njit(parallel=True, fastmath=True, nogil=True, boundscheck=False)
 def calculate_combined_loss(
     reflectance_mat, transmittance_mat,
     x_ant, y_ant,
+    freq_MHz: float,
+    pixel_size: float = 0.25,
     n_angles: int = 360*128,
     radial_step: float = 1.0,
-    max_reflections: int = 3,
+    max_reflections: int = 5,
     max_transmissions: int = 10,
     max_loss: float = 160.0
 ) -> np.ndarray:
@@ -181,18 +185,17 @@ def calculate_combined_loss(
             reflectance_mat, transmittance_mat, out_img,
             x_ant, y_ant,
             cos_v[i], sin_v[i],
-            0, 0,       # trans_ct, refl_ct
-            0.0,        # initial loss
+            0, 0,                # trans_ct, refl_ct
+            0.0,                 # acc_loss
+            0.0,                 # path_px
+            pixel_size, freq_MHz,
             radial_step, max_dist,
             max_transmissions, max_reflections,
             max_loss
         )
-
     return out_img
 
 
-import numpy as np
-from numba import njit, prange
 
 # ───────────────────────────────────────────────────────────────
 # helpers
@@ -326,7 +329,7 @@ def debug_combined_method(sample):
     ref, trans, dist = sample.input_img.cpu().numpy()
     x,y,freq_MHz = sample.x_ant, sample.y_ant, sample.freq_MHz
     fspl = calculate_fspl(dist, sample.freq_MHz)
-    comb = calculate_combined_loss(ref, trans, x, y, n_angles=360*128, max_reflections=5, max_transmissions=10)
+    comb = calculate_combined_loss(ref, trans, x, y, freq_MHz, n_angles=360*128, max_reflections=5, max_transmissions=10)
     tx   = calculate_transmission_loss_numpy(trans, x, y, freq_MHz, n_angles=360*128)
     print("Combined range:", comb.min(), comb.max())
     print("Trans range:  ", tx.min(), tx.max())
@@ -344,10 +347,10 @@ class Approx:
         x,y,freq_MHz = sample.x_ant, sample.y_ant, sample.freq_MHz
         fspl = calculate_fspl(dist, sample.freq_MHz)
         if self.method=='combined':
-            feat = calculate_combined_loss(ref, trans, x, y,
+            feat = calculate_combined_loss(ref, trans, x, y, freq_MHz,
                                            n_angles=360*128,
-                                           max_reflections=3,
-                                           max_transmissions=10) + fspl
+                                           max_reflections=5,
+                                           max_transmissions=10)
         else:
             feat = calculate_transmission_loss_numpy(trans, x, y, freq_MHz,
                                                      n_angles=360*128,
@@ -375,10 +378,9 @@ if __name__ == "__main__":
     ref0, trans0, dist0 = s0.input_img.cpu().numpy()[0], s0.input_img.cpu().numpy()[1], s0.input_img.cpu().numpy()[2]  
     # (assuming your channels are [ref, trans, dist]; adjust indexing if needed)  
     x0, y0, freq_MHz = s0.x_ant, s0.y_ant, s0.freq_MHz
-    fspl0   = calculate_fspl(dist0, s0.freq_MHz)  
 
     c0 = calculate_combined_loss(  
-        ref0, trans0, x0, y0,  
+        ref0, trans0, x0, y0, freq_MHz,
         n_angles=360*128,  
         max_reflections=0,  
         max_transmissions=10  
@@ -391,8 +393,7 @@ if __name__ == "__main__":
     )  
 
     compare_two_matrices(  
-        np.minimum(c0 + fspl0, 160.0),  
-        np.minimum(t0 + fspl0, 160.0),  
+        c0, t0,
         title1="Combined (0 reflections)",  
         title2="Transmission Only",  
         save_path="val.png"  
