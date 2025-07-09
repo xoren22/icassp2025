@@ -167,7 +167,7 @@ def load_samples(num_samples: int = 5) -> List[RadarSample]:
     # Convert to RadarSample objects
     samples = []
     np.random.shuffle(inputs_list)
-    for inputs in tqdm(inputs_list[:num_samples], desc="Loading samples"):
+    for inputs in tqdm(inputs_list[-num_samples:], desc="Loading samples"):
         sample = read_sample(inputs)
         samples.append(sample)
     
@@ -238,7 +238,7 @@ def visualize_predictions(samples, gts, preds_c, preds_t, n=3, save_path=None):
         s=samples[i]
         gt, pc, pt = gts[i].cpu().numpy(), preds_c[i].cpu().numpy(), preds_t[i].cpu().numpy()
         diff = pc-pt
-        err = np.abs(gt-pc)
+        err = gt-pc
         
         # Calculate RMSE values
         rmse_combined = rmse(torch.from_numpy(pc), torch.from_numpy(gt))
@@ -248,11 +248,14 @@ def visualize_predictions(samples, gts, preds_c, preds_t, n=3, save_path=None):
             (gt,       "GT"),
             (pc,       f"Combined (RMSE: {rmse_combined:.2f})"),
             (pt,       f"Transmission (RMSE: {rmse_transmission:.2f})"),
-            (err,      "|GT-Comb|"),
+            (err,      "GT-Comb"),
             (diff,     "Comb-Trans"),
             (gt-pt,    "GT-Trans"),
         ]):
-            im=axs[i,j].imshow(mat, vmax=160)
+            if j > 2:
+                im=axs[i,j].imshow(np.abs(mat), cmap='gray')
+            else:
+                im=axs[i,j].imshow(mat, vmax=160)
             axs[i,j].set_title(f"{title}")
             axs[i,j].plot(s.x_ant, s.y_ant, 'r*')
             axs[i,j].axis('off')

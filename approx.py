@@ -365,7 +365,7 @@ class Approx:
 # ---------------------------------------------------------------------
 if __name__ == "__main__":  
     # 1) load a handful of samples  
-    samples = load_samples(num_samples=5)  
+    samples = load_samples(num_samples=4)  
 
     # 2) run both methods  
     comb_model = Approx(method='combined')  
