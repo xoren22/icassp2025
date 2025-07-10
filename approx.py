@@ -145,7 +145,7 @@ def _trace_ray_recursive(
 
     # ─ paint current segment (distance = global_r + local step) ─
     steps = int(travelled / radial_step) + 1
-    for s in range(steps):
+    for s in range(1, steps):
         xi = x0 + dx * radial_step * s
         yi = y0 + dy * radial_step * s
         ix = int(round(xi));  iy = int(round(yi))
@@ -176,8 +176,8 @@ def _trace_ray_recursive(
     branch_made = False
 
     # (A) continue straight (air or inside-wall)
-    new_x = x0 + dx * travelled          # exact hit position, FLOAT
-    new_y = y0 + dy * travelled
+    new_x = x0 + dx * travelled #+ dx * radial_step
+    new_y = y0 + dy * travelled #+ dy * radial_step
     _trace_ray_recursive(
         refl_mat, trans_mat, nx_img, ny_img,
         out_img, counts,

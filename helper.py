@@ -285,3 +285,5 @@ def compare_hit_counts(tx_cnt, cmb_cnt, save="hit_counts.png"):
     _show_hit_stats(cmb_cnt, "Combined",                                        axes[1,0], axes[1,1])
     _show_hit_stats(np.float32(np.bool_(cmb_cnt)), "Boolean of Combined",       axes[2,0], axes[2,1])
     plt.tight_layout(); plt.savefig(save, dpi=150); plt.close(fig)
+    print(f"non hit counts for combined: {np.sum(cmb_cnt==0)}")
+    print(f"non hit counts for transmission: {np.sum(tx_cnt==0)}")
