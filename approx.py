@@ -3,6 +3,10 @@ from tqdm import tqdm
 from numba import njit, prange
 from helper import RadarSample, load_samples, compare_two_matrices, rmse, visualize_predictions
 
+
+MAX_REFL = 5
+MAX_TRANS = 15
+
 # ───────────────────────────────────────────────────────────────
 #  FREE-SPACE PATH-LOSS (scalar helper used everywhere)
 # ───────────────────────────────────────────────────────────────
@@ -36,16 +40,97 @@ def _step_until_wall(mat, x0, y0, dx, dy, radial_step, max_dist):
             return px, py, travelled, last_val, cur_val
     return -1, -1, travelled, last_val, last_val
 
+
+
+
+
+
+
+
+# ───────────────────────────────────────────────────────────────
+#  PCA-based wall-normal estimator (replaces old 4-way version)
+# ───────────────────────────────────────────────────────────────
+@njit(inline='always', cache=True)
+def _pca_angle(xs, ys):
+    """Return principal-axis angle in radians (0..π)."""
+    n   = xs.size
+    mx  = xs.mean()
+    my  = ys.mean()
+    sxx = syy = sxy = 0.0
+    for i in range(n):
+        dx = xs[i] - mx
+        dy = ys[i] - my
+        sxx += dx*dx
+        syy += dy*dy
+        sxy += dx*dy
+    sxx /= n; syy /= n; sxy /= n
+    return 0.5 * np.arctan2(2.0 * sxy, sxx - syy)   # first PC
+
+# ── 1. Offline normal-map generator (parallel) ─────────────────
+@njit(parallel=True, cache=True)
+def _precompute_normals_pca(refl, win=10):
+    h, w = refl.shape
+    nx_img = np.zeros(refl.shape, np.float32)
+    ny_img = np.zeros(refl.shape, np.float32)
+
+    for py in prange(h):
+        for px in range(w):
+            if refl[py, px] == 0:          # air pixel → skip
+                continue
+
+            y0 = max(py - win, 0);  y1 = min(py + win + 1, h)
+            x0 = max(px - win, 0);  x1 = min(px + win + 1, w)
+            patch = refl[y0:y1, x0:x1]
+            ys, xs = np.nonzero(patch)
+            if xs.size < 2:
+                continue
+
+            xs = xs.astype(np.float32) + x0
+            ys = ys.astype(np.float32) + y0
+
+            # PCA closed-form
+            mx, my = xs.mean(), ys.mean()
+            sxx = syy = sxy = 0.0
+            for i in range(xs.size):
+                dx = xs[i]-mx; dy = ys[i]-my
+                sxx += dx*dx; syy += dy*dy; sxy += dx*dy
+            n = xs.size
+            sxx/=n; syy/=n; sxy/=n
+            ang = 0.5*np.arctan2(2*sxy, sxx-syy)
+
+            nx =  np.sin(ang)          # normal = tangent+90°
+            ny = -np.cos(ang)
+            mag = np.hypot(nx, ny)
+            nx_img[py, px] = nx/mag
+            ny_img[py, px] = ny/mag
+    return nx_img, ny_img
+
+# ── 2. O(1) lookup (replaces old _estimate_normal) ─────────────
 @njit(inline='always')
-def _estimate_normal(refl_mat, px, py):
-    h, w = refl_mat.shape; val = refl_mat[py, px]
-    nx = 0.0; ny = 0.0
-    if px > 0   and refl_mat[py, px-1] != val: nx -= 1.0
-    if px < w-1 and refl_mat[py, px+1] != val: nx += 1.0
-    if py > 0   and refl_mat[py-1, px] != val: ny -= 1.0
-    if py < h-1 and refl_mat[py+1, px] != val: ny += 1.0
-    nrm = np.hypot(nx, ny)
-    return (0.0, 0.0) if nrm == 0.0 else (nx/nrm, ny/nrm)
+def _estimate_normal(nx_img, ny_img, px, py):
+    return nx_img[py, px], ny_img[py, px]
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 @njit(inline='always')
 def _reflect_dir(dx, dy, nx, ny):
@@ -80,7 +165,7 @@ def _paint_to_edge(out_img, x0, y0, dx, dy,
 # ───────────────────────────────────────────────────────────────
 @njit
 def _trace_ray_recursive(
-    refl_mat, trans_mat, out_img,
+    refl_mat, trans_mat, nx_img, ny_img, out_img,
     x0, y0, dx, dy,
     trans_ct, refl_ct,
     acc_loss,          # wall / reflection loss only
@@ -98,14 +183,22 @@ def _trace_ray_recursive(
     )
 
     # paint free-space segment with FSPL
+    visited_ix = -1; visited_iy = -1
     steps = int(travelled / radial_step) + 1
     for s in range(steps):
         xi = x0 + dx * radial_step * s
         yi = y0 + dy * radial_step * s
         ix = int(round(xi)); iy = int(round(yi))
+        # skip if same pixel as previous iteration
+        if ix == visited_ix and iy == visited_iy:
+            continue
+        visited_ix, visited_iy = ix, iy
         if ix < 0 or ix >= out_img.shape[1] or iy < 0 or iy >= out_img.shape[0]:
             break
-        fspl = _fspl((path_px + radial_step*s) * pixel_size, freq_MHz)
+        d_pix = _euclidean_distance(ix, iy, x_ant=x0, y_ant=y0, pixel_size=pixel_size)  # we'll adjust below
+        # Actually antenna is at original (x_ant,y_ant) of trace root, which is fixed across recursion: always the initial antenna pixel.
+        # pass original antenna coords via function?  For now approximate using sqrt((ix-x_ant)^2...) stored outside? We don't have x_ant param here.
+        fspl = _fspl(d_pix, freq_MHz)
         tot  = acc_loss + fspl
         if tot < out_img[iy, ix]:
             out_img[iy, ix] = tot if tot < max_loss else max_loss
@@ -116,12 +209,15 @@ def _trace_ray_recursive(
 
     new_path_px = path_px + travelled
 
-    # transmission branch
+    # decide which branches are still allowed
+    branch_made = False
+
+    # (1) transmission through the wall
     if trans_ct < max_trans:
         _trace_ray_recursive(
-            refl_mat, trans_mat, out_img,
+            refl_mat, trans_mat, nx_img, ny_img, out_img,
             px_hit, py_hit, dx, dy,
-            trans_ct+1, refl_ct,
+            trans_ct + 1, refl_ct,
             acc_loss + trans_mat[py_hit, px_hit],
             new_path_px,
             pixel_size, freq_MHz,
@@ -129,21 +225,17 @@ def _trace_ray_recursive(
             max_trans, max_refl,
             max_loss
         )
-    else:
-        _paint_to_edge(out_img, px_hit, py_hit, dx, dy,
-                       acc_loss, new_path_px,
-                       pixel_size, freq_MHz,
-                       radial_step, max_dist, max_loss)
+        branch_made = True
 
-    # reflection branch
+    # (2) reflection from the wall
     if refl_ct < max_refl:
-        nx, ny = _estimate_normal(refl_mat, px_hit, py_hit)
+        nx, ny = _estimate_normal(nx_img, ny_img, px_hit, py_hit)
         if nx != 0.0 or ny != 0.0:
             rdx, rdy = _reflect_dir(dx, dy, nx, ny)
             _trace_ray_recursive(
-                refl_mat, trans_mat, out_img,
+                refl_mat, trans_mat, nx_img, ny_img, out_img,
                 px_hit, py_hit, rdx, rdy,
-                trans_ct, refl_ct+1,
+                trans_ct, refl_ct + 1,
                 acc_loss + refl_mat[py_hit, px_hit],
                 new_path_px,
                 pixel_size, freq_MHz,
@@ -151,14 +243,14 @@ def _trace_ray_recursive(
                 max_trans, max_refl,
                 max_loss
             )
-    else:
-        _paint_to_edge(out_img, px_hit, py_hit, dx, dy,
-                       acc_loss, new_path_px,
-                       pixel_size, freq_MHz,
-                       radial_step, max_dist, max_loss)
+            branch_made = True
+
+    # (3) if no branch was possible, budgets are exhausted → stop
+    if not branch_made:
+        return
 
 # ───────────────────────────────────────────────────────────────
-#  PUBLIC ENTRY-POINT
+#  COMBINED TRACE  (with pre-computed PCA normal map)
 # ───────────────────────────────────────────────────────────────
 @njit(parallel=True, fastmath=True, nogil=True, boundscheck=False)
 def calculate_combined_loss(
@@ -166,31 +258,44 @@ def calculate_combined_loss(
     x_ant, y_ant,
     freq_MHz: float,
     pixel_size: float = 0.25,
-    n_angles: int = 360*128,
+    n_angles: int = 360 * 128 * 1,
     radial_step: float = 1.0,
-    max_reflections: int = 5,
-    max_transmissions: int = 10,
-    max_loss: float = 160.0
+    max_reflections: int = MAX_REFL,
+    max_trans: int = MAX_TRANS,
+    max_loss: float = 160.0,
+    pca_win: int = 10                     # half-window for PCA
 ) -> np.ndarray:
+    """
+    Casts `n_angles` rays, accounting for wall transmissions + reflections.
+    Wall normals come from a *once-per-image* PCA pass, eliminating the
+    expensive per-hit computation.
+    """
     h, w = reflectance_mat.shape
     out_img = np.full((h, w), max_loss, dtype=np.float32)
 
+    # 1) one-time normal-map build (numba-parallel)
+    nx_img, ny_img = _precompute_normals_pca(reflectance_mat, pca_win)
+
+    # 2) constant trig tables for ray launch
     dtheta   = 2.0 * np.pi / n_angles
     max_dist = np.hypot(w, h)
     cos_v    = np.cos(np.arange(n_angles) * dtheta)
     sin_v    = np.sin(np.arange(n_angles) * dtheta)
 
+    # 3) launch rays in parallel
     for i in prange(n_angles):
         _trace_ray_recursive(
-            reflectance_mat, transmittance_mat, out_img,
+            reflectance_mat, transmittance_mat,
+            nx_img, ny_img,            # ← NEW look-up images
+            out_img,
             x_ant, y_ant,
             cos_v[i], sin_v[i],
-            0, 0,                # trans_ct, refl_ct
-            0.0,                 # acc_loss
-            0.0,                 # path_px
+            0, 0,                      # trans_ct, refl_ct
+            0.0,                       # acc_loss
+            0.0,                       # path_px
             pixel_size, freq_MHz,
             radial_step, max_dist,
-            max_transmissions, max_reflections,
+            max_trans, max_reflections,
             max_loss
         )
     return out_img
@@ -220,7 +325,7 @@ def calculate_transmission_loss_numpy(
     x_ant: float,
     y_ant: float,
     freq_MHz: float,
-    n_angles: int = 360 * 128,
+    n_angles: int = 360 * 128 * 1,
     radial_step: float = 1.0,
     max_walls: int = 10
 ) -> np.ndarray:
@@ -275,23 +380,23 @@ def calculate_transmission_loss_numpy(
                         break
                     wall_ct += 1
                     if wall_ct >= max_walls:
-                        # fill the rest of the ray with current loss
-                        r_tmp = r
-                        while r_tmp <= max_dist:
-                            x_t = x_ant + r_tmp * ct
-                            y_t = y_ant + r_tmp * st
-                            px_t = int(round(x_t))
-                            py_t = int(round(y_t))
-                            if px_t < 0 or px_t >= w or py_t < 0 or py_t >= h:
-                                break
-                            if counts[py_t, px_t] == 0:
-                                out[py_t, px_t] = sum_loss
-                                counts[py_t, px_t] = 1
-                            else:
-                                c = counts[py_t, px_t]
-                                out[py_t, px_t] = (out[py_t, px_t] * c + sum_loss) / (c + 1)
-                                counts[py_t, px_t] = c + 1
-                            r_tmp += radial_step
+                        # # fill the rest of the ray with current loss
+                        # r_tmp = r
+                        # while r_tmp <= max_dist:
+                        #     x_t = x_ant + r_tmp * ct
+                        #     y_t = y_ant + r_tmp * st
+                        #     px_t = int(round(x_t))
+                        #     py_t = int(round(y_t))
+                        #     if px_t < 0 or px_t >= w or py_t < 0 or py_t >= h:
+                        #         break
+                        #     if counts[py_t, px_t] == 0:
+                        #         out[py_t, px_t] = sum_loss
+                        #         counts[py_t, px_t] = 1
+                        #     else:
+                        #         c = counts[py_t, px_t]
+                        #         out[py_t, px_t] = (out[py_t, px_t] * c + sum_loss) / (c + 1)
+                        #         counts[py_t, px_t] = c + 1
+                        #     r_tmp += radial_step
                         break
                 last_val = val
 
@@ -322,19 +427,19 @@ def calculate_transmission_loss_numpy(
     return out
 
 
-# ---------------------------------------------------------------------
-#  VIS & DEBUG
-# ---------------------------------------------------------------------
-def debug_combined_method(sample):
-    ref, trans, dist = sample.input_img.cpu().numpy()
-    x,y,freq_MHz = sample.x_ant, sample.y_ant, sample.freq_MHz
-    fspl = calculate_fspl(dist, sample.freq_MHz)
-    comb = calculate_combined_loss(ref, trans, x, y, freq_MHz, n_angles=360*128, max_reflections=5, max_transmissions=10)
-    tx   = calculate_transmission_loss_numpy(trans, x, y, freq_MHz, n_angles=360*128)
-    print("Combined range:", comb.min(), comb.max())
-    print("Trans range:  ", tx.min(), tx.max())
-    print("Painted pixels diff:", np.sum(comb>0), np.sum(tx>0))
-    return comb, tx, fspl
+# # ---------------------------------------------------------------------
+# #  VIS & DEBUG
+# # ---------------------------------------------------------------------
+# def debug_combined_method(sample):
+#     ref, trans, dist = sample.input_img.cpu().numpy()
+#     x,y,freq_MHz = sample.x_ant, sample.y_ant, sample.freq_MHz
+#     fspl = calculate_fspl(dist, sample.freq_MHz)
+#     comb = calculate_combined_loss(ref, trans, x, y, freq_MHz, n_angles=360 * 128 * 1, max_reflections=5, max_trans=10)
+#     tx   = calculate_transmission_loss_numpy(trans, x, y, freq_MHz, n_angles=360 * 128 * 1)
+#     print("Combined range:", comb.min(), comb.max())
+#     print("Trans range:  ", tx.min(), tx.max())
+#     print("Painted pixels diff:", np.sum(comb>0), np.sum(tx>0))
+#     return comb, tx, fspl
 
 # ---------------------------------------------------------------------
 #  WRAPPER CLASS
@@ -342,23 +447,25 @@ def debug_combined_method(sample):
 class Approx:
     def __init__(self, method='combined'):
         self.method = method
-    def approximate(self, sample: RadarSample) -> torch.Tensor:
+    def approximate(self, sample: RadarSample, max_trans, max_reflections) -> torch.Tensor:
         ref, trans, dist = sample.input_img.cpu().numpy()
         x,y,freq_MHz = sample.x_ant, sample.y_ant, sample.freq_MHz
-        fspl = calculate_fspl(dist, sample.freq_MHz)
+
         if self.method=='combined':
             feat = calculate_combined_loss(ref, trans, x, y, freq_MHz,
-                                           n_angles=360*128,
-                                           max_reflections=5,
-                                           max_transmissions=10)
+                                           n_angles=360 * 128 * 1,
+                                           max_reflections=max_reflections,
+                                           max_trans=max_trans
+                                           )
         else:
             feat = calculate_transmission_loss_numpy(trans, x, y, freq_MHz,
-                                                     n_angles=360*128,
+                                                     n_angles=360 * 128 * 1,
                                                      max_walls=10)
         out = np.minimum(feat, 160.0)
         return torch.from_numpy(np.floor(out))
-    def predict(self, samples):
-        return [self.approximate(s) for s in tqdm(samples, "predicting")]
+    
+    def predict(self, samples, max_trans=MAX_TRANS, max_reflections=5):
+        return [self.approximate(s, max_trans=max_trans, max_reflections=max_reflections) for s in tqdm(samples, "predicting")]
 
 # ---------------------------------------------------------------------
 #  MAIN
@@ -375,22 +482,9 @@ if __name__ == "__main__":
 
     # 3) zero-reflection sanity check  
     s0    = samples[0]  
-    ref0, trans0, dist0 = s0.input_img.cpu().numpy()[0], s0.input_img.cpu().numpy()[1], s0.input_img.cpu().numpy()[2]  
-    # (assuming your channels are [ref, trans, dist]; adjust indexing if needed)  
-    x0, y0, freq_MHz = s0.x_ant, s0.y_ant, s0.freq_MHz
 
-    c0 = calculate_combined_loss(  
-        ref0, trans0, x0, y0, freq_MHz,
-        n_angles=360*128,  
-        max_reflections=0,  
-        max_transmissions=10  
-    )  
-    t0 = calculate_transmission_loss_numpy(  
-        trans0, x0, y0, freq_MHz,
-        n_angles=360*128,  
-        radial_step=1.0,  
-        max_walls=10  
-    )  
+    t0 = trans_model.predict(samples)[0].cpu().numpy()
+    c0 = comb_model.predict(samples, max_reflections=0)[0].cpu().numpy()
 
     compare_two_matrices(  
         c0, t0,
@@ -402,11 +496,14 @@ if __name__ == "__main__":
     # 4) compute & print RMSE  
     rmses_c = [rmse(p, s.output_img) for p, s in zip(preds_comb,  samples)]  
     rmses_t = [rmse(p, s.output_img) for p, s in zip(preds_trans, samples)]  
+    rmses_t_plus_c = [rmse( (tp+cp)/2, s.output_img ) for tp, cp, s in zip(preds_trans, preds_comb, samples)]  
+
     print(f"RMSE (combined)   : {np.mean(rmses_c):.3f}")  
-    print(f"RMSE (transmission): {np.mean(rmses_t):.3f}")  
+    print(f"RMSE (transmission): {np.mean(rmses_t):.3f}")
+    print(f"RMSE (combined+transmission): {np.mean(rmses_t_plus_c):.3f}")
 
     # 5) optional per-sample debug of the first one  
-    debug_combined_method(samples[0])  
+    # debug_combined_method(samples[0])  
 
     # 6) final visualization  
     visualize_predictions(
@@ -415,5 +512,6 @@ if __name__ == "__main__":
         preds_comb,                          # combined preds
         preds_trans,                         # transmission‐only preds
         n=3,                                 # how many rows to plot
-        save_path="viz.png"
+        save_path="viz.png",
+        trans_mask = [100*s.input_img[1] for s in samples]
     )

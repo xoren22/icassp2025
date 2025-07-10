@@ -231,7 +231,7 @@ def compare_two_matrices(matrix1: np.ndarray, matrix2: np.ndarray,
     plt.close() 
 
 
-def visualize_predictions(samples, gts, preds_c, preds_t, n=3, save_path=None):
+def visualize_predictions(samples, gts, preds_c, preds_t, n=3, save_path=None, trans_mask=None):
     n = min(n, len(samples))
     fig, axs = plt.subplots(n, 6, figsize=(24,4*n))
     for i in range(n):
@@ -255,7 +255,8 @@ def visualize_predictions(samples, gts, preds_c, preds_t, n=3, save_path=None):
             if j > 2:
                 im=axs[i,j].imshow(np.abs(mat), cmap='gray')
             else:
-                im=axs[i,j].imshow(mat, vmax=160)
+                tm = trans_mask[i]
+                im=axs[i,j].imshow(mat+tm.cpu().numpy(), vmax=160)
             axs[i,j].set_title(f"{title}")
             axs[i,j].plot(s.x_ant, s.y_ant, 'r*')
             axs[i,j].axis('off')
