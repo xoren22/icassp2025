@@ -236,13 +236,13 @@ def visualize_predictions(samples, gts, preds_c, preds_t, n=3, save_path=None, t
     fig, axs = plt.subplots(n, 6, figsize=(24,4*n))
     for i in range(n):
         s=samples[i]
-        gt, pc, pt = gts[i].cpu().numpy(), preds_c[i].cpu().numpy(), preds_t[i].cpu().numpy()
+        gt, pc, pt = gts[i], preds_c[i], preds_t[i]
         diff = pc-pt
         err = gt-pc
         
         # Calculate RMSE values
-        rmse_combined = rmse(torch.from_numpy(pc), torch.from_numpy(gt))
-        rmse_transmission = rmse(torch.from_numpy(pt), torch.from_numpy(gt))
+        rmse_combined = rmse(pc, gt)
+        rmse_transmission = rmse(pt, gt)
         
         for j,(mat,title) in enumerate([
             (gt,       "GT"),
@@ -268,3 +268,20 @@ def visualize_predictions(samples, gts, preds_c, preds_t, n=3, save_path=None, t
         plt.show()
 
 
+def _show_hit_stats(counts, title, ax_hm, ax_hist):
+    vmax = np.percentile(counts, 99)
+    im   = ax_hm.imshow(counts, cmap="magma", vmin=0, vmax=vmax)
+    ax_hm.set_title(f"{title}\nmax={counts.max():.0f}", fontsize=10)
+    ax_hm.axis("off"); plt.colorbar(im, ax=ax_hm, fraction=0.05)
+
+    flat = counts.ravel()
+    ax_hist.hist(flat, bins=np.arange(flat.max()+2)-0.5, log=True, edgecolor="k", linewidth=0.3)
+    ax_hist.set_xlabel("hits / pixel"); ax_hist.set_ylabel("#pixels (log)")
+    ax_hist.set_title("Histogram")
+
+def compare_hit_counts(tx_cnt, cmb_cnt, save="hit_counts.png"):
+    fig, axes = plt.subplots(3,2, figsize=(10,15))
+    _show_hit_stats(tx_cnt,  "Transmission",                                    axes[0,0], axes[0,1])
+    _show_hit_stats(cmb_cnt, "Combined",                                        axes[1,0], axes[1,1])
+    _show_hit_stats(np.float32(np.bool_(cmb_cnt)), "Boolean of Combined",       axes[2,0], axes[2,1])
+    plt.tight_layout(); plt.savefig(save, dpi=150); plt.close(fig)
