@@ -4,9 +4,7 @@ from numba import njit, prange
 from helper import RadarSample, load_samples, compare_two_matrices, rmse, visualize_predictions
 
 
-MAX_REFL = 5
 MAX_TRANS = 15
-
 # ───────────────────────────────────────────────────────────────
 #  FREE-SPACE PATH-LOSS (scalar helper used everywhere)
 # ───────────────────────────────────────────────────────────────
@@ -183,22 +181,14 @@ def _trace_ray_recursive(
     )
 
     # paint free-space segment with FSPL
-    visited_ix = -1; visited_iy = -1
     steps = int(travelled / radial_step) + 1
     for s in range(steps):
         xi = x0 + dx * radial_step * s
         yi = y0 + dy * radial_step * s
         ix = int(round(xi)); iy = int(round(yi))
-        # skip if same pixel as previous iteration
-        if ix == visited_ix and iy == visited_iy:
-            continue
-        visited_ix, visited_iy = ix, iy
         if ix < 0 or ix >= out_img.shape[1] or iy < 0 or iy >= out_img.shape[0]:
             break
-        d_pix = _euclidean_distance(ix, iy, x_ant=x0, y_ant=y0, pixel_size=pixel_size)  # we'll adjust below
-        # Actually antenna is at original (x_ant,y_ant) of trace root, which is fixed across recursion: always the initial antenna pixel.
-        # pass original antenna coords via function?  For now approximate using sqrt((ix-x_ant)^2...) stored outside? We don't have x_ant param here.
-        fspl = _fspl(d_pix, freq_MHz)
+        fspl = _fspl((path_px + radial_step*s) * pixel_size, freq_MHz)
         tot  = acc_loss + fspl
         if tot < out_img[iy, ix]:
             out_img[iy, ix] = tot if tot < max_loss else max_loss
@@ -260,7 +250,7 @@ def calculate_combined_loss(
     pixel_size: float = 0.25,
     n_angles: int = 360 * 128 * 1,
     radial_step: float = 1.0,
-    max_reflections: int = MAX_REFL,
+    max_reflections: int = 5,
     max_trans: int = MAX_TRANS,
     max_loss: float = 160.0,
     pca_win: int = 10                     # half-window for PCA
@@ -447,7 +437,7 @@ def calculate_transmission_loss_numpy(
 class Approx:
     def __init__(self, method='combined'):
         self.method = method
-    def approximate(self, sample: RadarSample, max_trans, max_reflections) -> torch.Tensor:
+    def approximate(self, sample: RadarSample, max_trans=MAX_TRANS, max_reflections=5) -> torch.Tensor:
         ref, trans, dist = sample.input_img.cpu().numpy()
         x,y,freq_MHz = sample.x_ant, sample.y_ant, sample.freq_MHz
 
