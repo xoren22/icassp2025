@@ -7,7 +7,7 @@ from helper import (RadarSample, load_samples, rmse, visualize_predictions, comp
 #  GLOBALS                                                             #
 # ---------------------------------------------------------------------#
 MAX_REFL  = 0            # reflection budget for normal runs
-MAX_TRANS = 500000           # transmission (wall) budget
+MAX_TRANS = 10           # transmission (wall) budget
 
 # ---------------------------------------------------------------------#
 #  NUMERIC BASICS                                                      #
@@ -97,31 +97,6 @@ def _reflect_dir(dx, dy, nx, ny):
     rx = dx - 2.0*dot*nx;  ry = dy - 2.0*dot*ny
     mag = np.hypot(rx, ry)
     return (-dx, -dy) if mag==0 else (rx/mag, ry/mag)
-
-# ───────────────────────────────────────────────────────────────
-#  Flood-to-edge helper  (writes remaining air pixels once)
-# ───────────────────────────────────────────────────────────────
-@njit(inline='always')
-def _flood_to_edge(out_img, counts,
-                   x0, y0, dx, dy,
-                   acc_loss, path_px,
-                   pixel_size, freq_MHz,
-                   radial_step, max_dist, max_loss):
-    h, w = out_img.shape
-    r = 0.0
-    while r <= max_dist:
-        ix = int(round(x0 + dx*r));  iy = int(round(y0 + dy*r))
-        if ix < 0 or ix >= w or iy < 0 or iy >= h:
-            return
-        fspl = _fspl((path_px + r) * pixel_size, freq_MHz)
-        tot  = acc_loss + fspl
-        if tot > max_loss:
-            tot = max_loss
-        c = counts[iy, ix]
-        out_img[iy, ix] = tot if c == 0 else (out_img[iy, ix]*c + tot)/(c+1)
-        counts[iy, ix]  = c + 1
-        r += radial_step
-
 
 @njit
 def _trace_ray_recursive(
