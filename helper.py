@@ -110,67 +110,67 @@ def read_sample(inputs: Union[RadarSampleInputs, dict]) -> RadarSample:
     
     return sample
 
-
 def load_samples(num_samples: int = 5) -> List[RadarSample]:
-    """Load a specified number of radar samples from the default data directory."""
-    # Define paths (matching main.py structure)
+    """
+    Return `num_samples` random RadarSample objects.
+
+    The catalogue is built once (no early breaks), then a random
+    subset of distinct indices is drawn without replacement.
+    """
     freqs_MHz = [868, 1800, 3500]
-    BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-    DATA_DIR = os.path.join(BASE_DIR, "data/train/")
-    INPUT_PATH = os.path.join(DATA_DIR, "Inputs/Task_2_ICASSP/")
-    OUTPUT_PATH = os.path.join(DATA_DIR, "Outputs/Task_2_ICASSP/")
-    POSITIONS_PATH = os.path.join(DATA_DIR, "Positions/")
-    RADIATION_PATTERNS_PATH = os.path.join(DATA_DIR, "Radiation_Patterns/")
-    
-    # Build list of available samples
-    inputs_list = []
-    for b in range(1, 26):  # 25 buildings
-        for ant in range(1, 3):  # 2 antenna types
-            for f in range(1, 4):  # 3 frequencies
-                for sp in range(80):  # 80 sampling positions
-                    # Check if files exist
-                    input_file = f"B{b}_Ant{ant}_f{f}_S{sp}.png"
-                    output_file = f"B{b}_Ant{ant}_f{f}_S{sp}.png"
-                    
-                    input_img_path = os.path.join(INPUT_PATH, input_file)
-                    output_img_path = os.path.join(OUTPUT_PATH, output_file)
-                    
-                    if os.path.exists(input_img_path) and os.path.exists(output_img_path):
-                        radiation_file = f"Ant{ant}_Pattern.csv"
-                        position_file = f"Positions_B{b}_Ant{ant}_f{f}.csv"
+    BASE_DIR  = os.path.dirname(os.path.abspath(__file__))
+    DATA_DIR  = os.path.join(BASE_DIR, "data/train/")
+    INPUT_DIR = os.path.join(DATA_DIR, "Inputs/Task_2_ICASSP/")
+    OUTPUT_DIR = os.path.join(DATA_DIR, "Outputs/Task_2_ICASSP/")
+    POS_DIR   = os.path.join(DATA_DIR, "Positions/")
+    PAT_DIR   = os.path.join(DATA_DIR, "Radiation_Patterns/")
 
-                        freq_MHz = freqs_MHz[f-1]
-                        positions_path = os.path.join(POSITIONS_PATH, position_file)
-                        radiation_pattern_file = os.path.join(RADIATION_PATTERNS_PATH, radiation_file)
+    # ──────────────────────────────
+    # build complete catalogue
+    # ──────────────────────────────
+    inputs_list: List[RadarSampleInputs] = []
 
-                        radar_sample_inputs = RadarSampleInputs(
+    for b in range(1, 26):          # 25 buildings
+        for ant in range(1, 3):     # 2 antenna types
+            for f_idx, freq_MHz in enumerate(freqs_MHz, start=1):
+                for sp in range(80):    # 80 positions
+                    name = f"B{b}_Ant{ant}_f{f_idx}_S{sp}.png"
+                    inp  = os.path.join(INPUT_DIR,  name)
+                    out  = os.path.join(OUTPUT_DIR, name)
+                    if not (os.path.exists(inp) and os.path.exists(out)):
+                        continue
+
+                    radiation_file = os.path.join(PAT_DIR, f"Ant{ant}_Pattern.csv")
+                    position_file  = os.path.join(POS_DIR,
+                                                  f"Positions_B{b}_Ant{ant}_f{f_idx}.csv")
+
+                    inputs_list.append(
+                        RadarSampleInputs(
                             freq_MHz=freq_MHz,
-                            input_file=input_img_path,
-                            output_file=output_img_path,
-                            position_file=positions_path,
-                            radiation_pattern_file=radiation_pattern_file,
+                            input_file=inp,
+                            output_file=out,
+                            position_file=position_file,
+                            radiation_pattern_file=radiation_file,
                             sampling_position=sp,
-                            ids=(b, ant, f, sp),
+                            ids=(b, ant, f_idx, sp),
                         )
-                        inputs_list.append(radar_sample_inputs)
-                        
-                        # Stop if we have enough samples
-                        if len(inputs_list) >= num_samples:
-                            break
-                if len(inputs_list) >= num_samples:
-                    break
-            if len(inputs_list) >= num_samples:
-                break
-        if len(inputs_list) >= num_samples:
-            break
-    
-    # Convert to RadarSample objects
-    samples = []
-    np.random.shuffle(inputs_list)
-    for inputs in tqdm(inputs_list[-num_samples:], desc="Loading samples"):
-        sample = read_sample(inputs)
-        samples.append(sample)
-    
+                    )
+
+    if num_samples > len(inputs_list):
+        raise ValueError(f"Requested {num_samples} samples, "
+                         f"but only {len(inputs_list)} available.")
+
+    # ──────────────────────────────
+    # random subset without replacement
+    # ──────────────────────────────
+    sel_idx = np.random.choice(len(inputs_list),
+                               size=num_samples,
+                               replace=False)
+
+    samples: List[RadarSample] = []
+    for idx in tqdm(sel_idx, desc="Loading samples"):
+        samples.append(read_sample(inputs_list[idx]))
+
     return samples
 
 

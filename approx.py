@@ -37,9 +37,10 @@ def _step_until_wall(mat, x0, y0, dx, dy, radial_step, max_dist):
     travelled = 0.0
 
     while travelled <= max_dist:
-        x += dx * radial_step;  y += dy * radial_step
+        x += dx * radial_step
+        y += dy * radial_step
         travelled += radial_step
-        px = int(round(x));  py = int(round(y))
+        px, py = int(round(x)), int(round(y))
 
         if px < 0 or px >= w or py < 0 or py >= h:
             return -1, -1, -1, -1, travelled, last_val, last_val
@@ -318,7 +319,7 @@ class Approx:
 #  MAIN                                                                #
 # ---------------------------------------------------------------------#
 if __name__ == "__main__":
-    samples = load_samples(num_samples=3)
+    samples = load_samples(num_samples=10)
 
     # --- zero-reflection sanity check on first sample ---
     s0 = samples[0]
@@ -346,7 +347,7 @@ if __name__ == "__main__":
     trans_model = Approx("transmission")
 
     preds_comb  = comb_model.predict(samples, max_refl=MAX_REFL)
-    preds_trans = trans_model.predict(samples, max_refl=0)
+    preds_trans = trans_model.predict(samples, max_refl=MAX_REFL)
 
     rms_c  = [rmse(p, s.output_img) for p, s in zip(preds_comb,  samples)]
     rms_t  = [rmse(p, s.output_img) for p, s in zip(preds_trans, samples)]
