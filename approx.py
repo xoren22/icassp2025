@@ -234,12 +234,7 @@ def calculate_combined_loss(
 #  TRANSMISSION-ONLY TRACE                                             #
 # ---------------------------------------------------------------------#
 @njit(parallel=True, fastmath=True, nogil=True, boundscheck=False)
-def calculate_transmission_loss_numpy(trans_mat,
-                                      x_ant, y_ant, freq_MHz,
-                                      n_angles=360*128,
-                                      radial_step=1.0,
-                                      max_walls=MAX_TRANS,
-                                      max_loss=160.0):
+def calculate_transmission_loss_numpy(trans_mat, x_ant, y_ant, freq_MHz, n_angles=360*128, radial_step=1.0, max_walls=MAX_TRANS, max_loss=160.0):
 
     h, w  = trans_mat.shape
     out   = np.zeros((h,w), np.float64)
@@ -319,7 +314,8 @@ class Approx:
 #  MAIN                                                                #
 # ---------------------------------------------------------------------#
 if __name__ == "__main__":
-    samples = load_samples(num_samples=10)
+    N = 10
+    samples = load_samples(num_samples=N)
 
     # --- zero-reflection sanity check on first sample ---
     s0 = samples[0]
@@ -358,7 +354,7 @@ if __name__ == "__main__":
     visualize_predictions(
         samples, [s.output_img for s in samples],
         preds_comb, preds_trans,
-        n=3, save_path="viz.png",
+        n=N, save_path="viz.png",
         trans_mask=[torch.zeros_like(s.input_img[1]) for s in samples])
 
     print("Saved: val.png  hit_counts.png  viz.png")
