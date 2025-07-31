@@ -316,6 +316,11 @@ class Approx:
                                            max_refl=max_refl,
                                            max_trans=max_trans
                                         )
+        elif self.method == 'beamtrace':
+            from beamtrace import calculate_beamtrace_loss  # local import to avoid cyclic jit cost
+            feat, _ = calculate_beamtrace_loss(ref, trans, x, y, f,
+                                              max_refl=max_refl,
+                                              max_trans=max_trans)
         else:
             feat, _ = calculate_transmission_loss_numpy(trans, x, y, f,
                                                      max_walls=max_trans)
@@ -330,47 +335,103 @@ class Approx:
 #  MAIN                                                                #
 # ---------------------------------------------------------------------#
 if __name__ == "__main__":
-    N = 10
+    import argparse
+
+    parser = argparse.ArgumentParser("Approximation demo")
+    parser.add_argument("-N", type=int, default=10, help="number of random samples to load")
+    parser.add_argument("--compare0", action="store_true",
+                        help="generate zero-reflection combined vs transmission comparison (val.png)")
+    parser.add_argument("--hits", action="store_true",
+                        help="generate hit-count plots (hit_counts.png)")
+    args = parser.parse_args()
+
+    N = args.N
     samples = load_samples(num_samples=N)
 
-    # --- zero-reflection sanity check on first sample ---
-    s0 = samples[0]
-    ref, trans, _ = s0.input_img.cpu().numpy()
-    x, y, f = s0.x_ant, s0.y_ant, s0.freq_MHz
+    # --- optional zero-reflection / hit-count diagnostics ---
+    if args.compare0 or args.hits:
+        s0 = samples[0]
+        ref, trans, _ = s0.input_img.cpu().numpy()
+        x, y, f = s0.x_ant, s0.y_ant, s0.freq_MHz
 
-    tx_map, tx_cnt = calculate_transmission_loss_numpy(
-        trans, x, y, f, n_angles=360*128,
-        max_walls=MAX_TRANS)
+        tx_map, tx_cnt = calculate_transmission_loss_numpy(
+            trans, x, y, f, n_angles=360*128,
+            max_walls=MAX_TRANS)
 
-    cmb_map, cmb_cnt = calculate_combined_loss(
-        ref, trans, x, y, f,
-        max_refl=0, max_trans=MAX_TRANS,
-        n_angles=360*128)
+        cmb_map, cmb_cnt = calculate_combined_loss(
+            ref, trans, x, y, f,
+            max_refl=0, max_trans=MAX_TRANS,
+            n_angles=360*128)
 
-    compare_two_matrices(cmb_map, tx_map,
-                         title1="Combined (0 reflections)",
-                         title2="Transmission Only",
-                         save_path="val.png")
+        if args.compare0:
+            compare_two_matrices(cmb_map, tx_map,
+                                 title1="Combined (0 reflections)",
+                                 title2="Transmission Only",
+                                 save_path="val.png")
 
-    compare_hit_counts(tx_cnt, cmb_cnt, save="hit_counts.png")
+        if args.hits:
+            compare_hit_counts(tx_cnt, cmb_cnt, save="hit_counts.png")
 
     # --- full-budget predictions for RMSE ---
-    comb_model  = Approx("combined")
-    trans_model = Approx("transmission")
+    comb_model = Approx("combined")
+    beam_model = Approx("beamtrace")
 
-    preds_comb  = comb_model.predict(samples, max_refl=MAX_REFL)
-    preds_trans = trans_model.predict(samples, max_refl=MAX_REFL)
+    preds_comb = comb_model.predict(samples, max_refl=MAX_REFL)
+    preds_beam = beam_model.predict(samples, max_refl=MAX_REFL)
 
-    rms_c  = [rmse(p, s.output_img) for p, s in zip(preds_comb,  samples)]
-    rms_t  = [rmse(p, s.output_img) for p, s in zip(preds_trans, samples)]
+    rms_c = [rmse(p, s.output_img) for p, s in zip(preds_comb, samples)]
+    rms_b = [rmse(p, s.output_img) for p, s in zip(preds_beam, samples)]
 
-    print(f"RMSE (combined)  : {np.mean(rms_c):.3f}")
-    print(f"RMSE (trans)     : {np.mean(rms_t):.3f}")
+    print(f"RMSE (combined) : {np.mean(rms_c):.3f}")
+    print(f"RMSE (beam)     : {np.mean(rms_b):.3f}")
 
-    visualize_predictions(
-        samples, [s.output_img for s in samples],
-        preds_comb, preds_trans,
-        n=N, save_path="viz.png",
-        trans_mask=[torch.zeros_like(s.input_img[1]) for s in samples])
+    # ────────────────────────────────────────────────────────────
+    # Visual comparison (generic): GT + each approximator + all
+    # unique pairwise diff images. Diff is shown as |A-B| in gray.
+    # ────────────────────────────────────────────────────────────
+    import matplotlib.pyplot as plt
+    import itertools
 
-    print("Saved: val.png  hit_counts.png  viz.png")
+    n_show = min(3, N)
+    base_names = ["GT", "Combined", "Beam"]
+
+    for idx in range(n_show):
+        mats = [samples[idx].output_img, preds_comb[idx], preds_beam[idx]]
+
+        # pairwise diffs
+        diffs = []
+        diff_titles = []
+        for (a, b) in itertools.combinations(range(len(mats)), 2):
+            diffs.append(np.abs(mats[a] - mats[b]))
+            diff_titles.append(f"|{base_names[a][0]}-{base_names[b][0]}|")
+
+        row_mats   = mats + diffs
+        row_titles = base_names.copy()
+        # append RMSE for approximators in titles
+        row_titles[1] = f"Combined ({rmse(mats[1], mats[0]):.2f})"
+        row_titles[2] = f"Beam ({rmse(mats[2], mats[0]):.2f})"
+        row_titles.extend(diff_titles)
+
+        if idx == 0:
+            # create figure with dynamic column count after knowing sizes
+            n_cols = len(row_mats)
+            fig, axes = plt.subplots(n_show, n_cols, figsize=(4 * n_cols, 4 * n_show))
+
+        for col, (mat, title) in enumerate(zip(row_mats, row_titles)):
+            ax = axes[idx, col]
+            if col < len(mats):
+                im = ax.imshow(mat, vmax=160)
+            else:
+                im = ax.imshow(mat, cmap='gray')  # diff
+            ax.set_title(title)
+            ax.axis('off')
+            fig.colorbar(im, ax=ax, fraction=0.04)
+
+    plt.tight_layout(); plt.savefig("viz.png", dpi=150); plt.close(fig)
+
+    saved = ["viz.png"]
+    if args.compare0:
+        saved.append("val.png")
+    if args.hits:
+        saved.append("hit_counts.png")
+    print("Saved:", "  ".join(saved))

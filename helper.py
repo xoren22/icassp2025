@@ -110,7 +110,7 @@ def read_sample(inputs: Union[RadarSampleInputs, dict]) -> RadarSample:
     
     return sample
 
-def load_samples(num_samples: int = 5, seed: Optional[int] = 42) -> List[RadarSample]:
+def load_samples(num_samples: int = 5, seed: Optional[int] = 0) -> List[RadarSample]:
     """
     Return ``num_samples`` pseudo-random ``RadarSample`` objects.  By default a
     fixed seed (42) is used so the same subset is selected every run.  Pass
