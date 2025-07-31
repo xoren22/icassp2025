@@ -234,10 +234,10 @@ def calculate_combined_loss(
 #  TRANSMISSION-ONLY TRACE                                             #
 # ---------------------------------------------------------------------#
 @njit(parallel=True, fastmath=True, nogil=True, boundscheck=False)
-def calculate_transmission_loss_numpy(trans_mat, x_ant, y_ant, freq_MHz, n_angles=360*128, radial_step=1.0, max_walls=MAX_TRANS, max_loss=160.0):
+def calculate_transmission_loss_numpy(trans_mat, x_ant, y_ant, freq_MHz, n_angles=360*128, radial_step=1.0, max_walls=MAX_TRANS, max_loss=160.0, pixel_size=0.25):
 
     h, w  = trans_mat.shape
-    out   = np.zeros((h,w), np.float64)
+    out   = np.full((h,w), max_loss, np.float64)  # Initialize to max_loss like combined method
     cnt   = np.zeros((h,w), np.float64)
 
     dtheta = 2.0*np.pi / n_angles
@@ -248,6 +248,7 @@ def calculate_transmission_loss_numpy(trans_mat, x_ant, y_ant, freq_MHz, n_angle
     for i in range(n_angles):
         ct, st = cos_v[i], sin_v[i]
         sum_loss = 0.0; last_val = None; wall_ct = 0; r=0.0
+        
         while r<=max_dist:
             x = x_ant + r*ct; y = y_ant + r*st
             px = int(round(x)); py = int(round(y))
@@ -265,21 +266,36 @@ def calculate_transmission_loss_numpy(trans_mat, x_ant, y_ant, freq_MHz, n_angle
                 sum_loss += last_val
                 wall_ct += 1
                 if sum_loss>=max_loss or wall_ct>=max_walls:
-                    sum_loss = min(sum_loss, max_loss); break
+                    sum_loss = min(sum_loss, max_loss)
+                    # Continue to fill this pixel before breaking
+                    fspl = _fspl(r * pixel_size, freq_MHz)
+                    tot = sum_loss + fspl
+                    tot = max_loss if tot > max_loss else tot
+                    # Use min-dB rule like combined method
+                    if tot < out[py,px]:
+                        out[py,px] = tot
+                    cnt[py,px] += 1.0
+                    break
             last_val = val
 
-            c = cnt[py,px]
-            out[py,px] = sum_loss if c==0 else (out[py,px]*c + sum_loss)/(c+1)
-            cnt[py,px] = c+1
+            # Calculate FSPL for this pixel
+            fspl = _fspl(r * pixel_size, freq_MHz)
+            tot = sum_loss + fspl
+            tot = max_loss if tot > max_loss else tot
+            
+            # Use min-dB rule like combined method
+            if tot < out[py,px]:
+                out[py,px] = tot
+            cnt[py,px] += 1.0
             r += radial_step
 
-    # FSPL pass
+    # Fill untouched pixels with direct-FSPL (same as combined method)
     for py in prange(h):
         for px in range(w):
-            d    = _euclidean_distance(px, py, x_ant, y_ant)
-            fspl = _fspl(d, freq_MHz)
-            tot  = out[py,px] + fspl
-            out[py,px] = max_loss if tot>max_loss else tot
+            if cnt[py, px] == 0:
+                d    = _euclidean_distance(px, py, x_ant, y_ant, pixel_size)
+                fspl = _fspl(d, freq_MHz)
+                out[py,px] = fspl if fspl < max_loss else max_loss
 
     return out, cnt
 
