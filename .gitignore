@@ -13,3 +13,4 @@ inference_outputs/
 tmp.py
 *.ipynb
 *.png
+*.csv

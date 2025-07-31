@@ -110,12 +110,16 @@ def read_sample(inputs: Union[RadarSampleInputs, dict]) -> RadarSample:
     
     return sample
 
-def load_samples(num_samples: int = 5) -> List[RadarSample]:
+def load_samples(num_samples: int = 5, seed: Optional[int] = 42) -> List[RadarSample]:
     """
-    Return `num_samples` random RadarSample objects.
+    Return ``num_samples`` pseudo-random ``RadarSample`` objects.  By default a
+    fixed seed (42) is used so the same subset is selected every run.  Pass
+    ``seed=None`` to restore fully random behaviour.  Supplying any other
+    integer gives a custom, but repeatable, subset (useful for profiling or
+    unit tests).
 
-    The catalogue is built once (no early breaks), then a random
-    subset of distinct indices is drawn without replacement.
+    The catalogue is built once (no early breaks), then a random subset of
+    distinct indices is drawn without replacement.
     """
     freqs_MHz = [868, 1800, 3500]
     BASE_DIR  = os.path.dirname(os.path.abspath(__file__))
@@ -163,9 +167,11 @@ def load_samples(num_samples: int = 5) -> List[RadarSample]:
     # ──────────────────────────────
     # random subset without replacement
     # ──────────────────────────────
-    sel_idx = np.random.choice(len(inputs_list),
-                               size=num_samples,
-                               replace=False)
+    if seed is None:
+        sel_idx = np.random.choice(len(inputs_list), size=num_samples, replace=False)
+    else:
+        rng = np.random.default_rng(seed)
+        sel_idx = rng.choice(len(inputs_list), size=num_samples, replace=False)
 
     samples: List[RadarSample] = []
     for idx in tqdm(sel_idx, desc="Loading samples"):
