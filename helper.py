@@ -75,6 +75,7 @@ def read_sample(inputs: Union[RadarSampleInputs, dict]) -> RadarSample:
     freq_MHz = inputs["freq_MHz"]
     input_file = inputs["input_file"]
     output_file = inputs.get("output_file")
+    ids = inputs.get("ids")
     position_file = inputs["position_file"]
     sampling_position = inputs["sampling_position"]
     radiation_pattern_file = inputs["radiation_pattern_file"]
@@ -106,6 +107,7 @@ def read_sample(inputs: Union[RadarSampleInputs, dict]) -> RadarSample:
         pixel_size=0.25,  # INITIAL_PIXEL_SIZE
         mask=torch.ones((H, W)),
         radiation_pattern=radiation_pattern,
+        ids=ids
     )
     
     return sample
