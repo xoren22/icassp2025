@@ -39,9 +39,17 @@ def load_precomputed_normals_for_building(building_id: int, refl: np.ndarray, tr
 # ---------------------------------------------------------------------#
 #  GLOBALS                                                             #
 # ---------------------------------------------------------------------#
-MAX_REFL  = 5            # reflection budget for normal runs
+MAX_REFL  = 10            # reflection budget for normal runs
 MAX_TRANS = 15           # transmission (wall) budget
-N_ANGLES  = 360*32       # single place to control angular resolution for combined method
+N_ANGLES  = 360*128      # single place to control angular resolution for combined method
+
+# Backfill configuration
+BACKFILL_METHOD = "los"     # options: "los", "diffuse", or "fspl"
+BACKFILL_PARAMS = {
+    "iters": 60,           # for diffuse
+    "lambda": 0.05,        # for diffuse
+    "alpha": 1.0,          # for diffuse
+}
 # ---------------------------------------------------------------------#
 #  NUMERIC BASICS                                                      #
 # ---------------------------------------------------------------------#
@@ -78,6 +86,144 @@ def _fspl_from_lut(lut: np.ndarray, step_index: int) -> float:
 @njit(inline='always')
 def _euclidean_distance(px, py, x_ant, y_ant, pixel_size=0.25):
     return np.hypot(px - x_ant, py - y_ant) * pixel_size
+
+# ---------------------------------------------------------------------#
+#  BACKFILL (CPU, numpy)                                               #
+# ---------------------------------------------------------------------#
+
+def _compute_fspl_field(h: int, w: int, x_ant: float, y_ant: float, pixel_size: float, freq_MHz: float, max_loss: float):
+    yy, xx = np.mgrid[0:h, 0:w]
+    d = np.hypot(xx - x_ant, yy - y_ant) * pixel_size
+    d = np.maximum(d, 0.125)
+    F = 20.0*np.log10(d) + 20.0*np.log10(freq_MHz) - 27.55
+    return np.minimum(F, max_loss).astype(np.float32)
+
+
+def _backfill_fspl(out: np.ndarray, cnt: np.ndarray, x_ant: float, y_ant: float, pixel_size: float, freq_MHz: float, max_loss: float) -> np.ndarray:
+    mask0 = (cnt == 0)
+    if not np.any(mask0):
+        return out
+    F = _compute_fspl_field(out.shape[0], out.shape[1], x_ant, y_ant, pixel_size, freq_MHz, max_loss)
+    out2 = out.copy()
+    out2[mask0] = F[mask0]
+    return np.minimum(out2, max_loss)
+
+
+def _backfill_diffuse_residual(out: np.ndarray, cnt: np.ndarray, x_ant: float, y_ant: float, pixel_size: float, freq_MHz: float, max_loss: float, *, iters: int = 60, lam: float = 0.05, alpha: float = 1.0) -> np.ndarray:
+    h, w = out.shape
+    mask0 = (cnt == 0)
+    if not np.any(mask0):
+        return out
+
+    F = _compute_fspl_field(h, w, x_ant, y_ant, pixel_size, freq_MHz, max_loss)
+    R = (out.astype(np.float32) - F).astype(np.float32)
+
+    # neighbor weights from counts (normalized 0..1)
+    cnt_f = cnt.astype(np.float32)
+    cmax = float(cnt_f.max()) if cnt_f.size > 0 else 1.0
+    norm = cnt_f / (cmax + 1e-6)
+    # shifted weights per direction
+    wL = 1.0 + alpha * np.pad(norm[:, 1:], ((0,0),(0,1)), mode='constant')  # left neighbor weight at (y,x)
+    wR = 1.0 + alpha * np.pad(norm[:, :-1], ((0,0),(1,0)), mode='constant') # right
+    wU = 1.0 + alpha * np.pad(norm[1:, :], ((0,1),(0,0)), mode='constant')  # up
+    wD = 1.0 + alpha * np.pad(norm[:-1, :], ((1,0),(0,0)), mode='constant') # down
+
+    # Precompute rolled R views for vectorized Jacobi
+    for _ in range(iters):
+        R_left  = np.pad(R[:, :-1], ((0,0),(1,0)), mode='edge')
+        R_right = np.pad(R[:, 1:],  ((0,0),(0,1)), mode='edge')
+        R_up    = np.pad(R[:-1, :], ((1,0),(0,0)), mode='edge')
+        R_down  = np.pad(R[1:, :],  ((0,1),(0,0)), mode='edge')
+
+        num = wL * R_left + wR * R_right + wU * R_up + wD * R_down
+        den = (wL + wR + wU + wD) + lam
+        R_new = R.copy()
+        R_new[mask0] = (num[mask0] / den[mask0]).astype(np.float32)
+        R = R_new
+
+    out2 = F + R
+    # enforce FSPL monotonic floor and cap
+    out2 = np.maximum(out2, F)
+    out2 = np.minimum(out2, max_loss)
+    # preserve known pixels strictly
+    out2[~mask0] = out[~mask0]
+    return out2.astype(np.float32)
+
+
+def _backfill_direct_los(out: np.ndarray, cnt: np.ndarray, trans_mat: np.ndarray, x_ant: float, y_ant: float, pixel_size: float, freq_MHz: float, max_loss: float) -> np.ndarray:
+    h, w = out.shape
+    mask0 = (cnt == 0)
+    if not np.any(mask0):
+        return out
+    out2 = out.copy()
+
+    # Precompute distance grid for FSPL
+    yy, xx = np.mgrid[0:h, 0:w]
+    dx = xx - x_ant
+    dy = yy - y_ant
+    dist = np.hypot(dx, dy) * pixel_size
+    dist = np.maximum(dist, 0.125)
+    fspl_grid = 20.0*np.log10(dist) + 20.0*np.log10(freq_MHz) - 27.55
+
+    for py in range(h):
+        for px in range(w):
+            if not mask0[py, px]:
+                continue
+            # DDA from antenna to (px,py)
+            x0, y0 = x_ant, y_ant
+            x1, y1 = float(px), float(py)
+            ddx = x1 - x0
+            ddy = y1 - y0
+            steps = int(max(abs(ddx), abs(ddy)))
+            if steps <= 0:
+                tot = fspl_grid[py, px]
+                out2[py, px] = tot if tot < max_loss else max_loss
+                cnt[py, px] = 1.0
+                continue
+            sx = ddx / steps
+            sy = ddy / steps
+            x = x0
+            y = y0
+            last_val = None
+            sum_loss = 0.0
+            for s in range(steps + 1):
+                ix = int(round(x)); iy = int(round(y))
+                if 0 <= ix < w and 0 <= iy < h:
+                    val = float(trans_mat[iy, ix])
+                    if last_val is None:
+                        last_val = val
+                    if val != last_val and last_val > 0.0 and val == 0.0:
+                        sum_loss += last_val
+                        if sum_loss >= max_loss:
+                            sum_loss = max_loss
+                            break
+                    last_val = val
+                x += sx
+                y += sy
+            fspl = fspl_grid[py, px]
+            tot = sum_loss + fspl
+            out2[py, px] = tot if tot < max_loss else max_loss
+            cnt[py, px] = 1.0
+    return out2.astype(np.float32)
+
+
+def apply_backfill(out: np.ndarray, cnt: np.ndarray, x_ant: float, y_ant: float, pixel_size: float, freq_MHz: float, max_loss: float, method: str = BACKFILL_METHOD, params: dict | None = None, *, trans_mat: np.ndarray | None = None) -> np.ndarray:
+    if params is None:
+        params = BACKFILL_PARAMS
+    if method == "fspl":
+        return _backfill_fspl(out, cnt, x_ant, y_ant, pixel_size, freq_MHz, max_loss)
+    elif method == "diffuse":
+        iters = int(params.get("iters", 60))
+        lam   = float(params.get("lambda", 0.05))
+        alpha = float(params.get("alpha", 1.0))
+        return _backfill_diffuse_residual(out, cnt, x_ant, y_ant, pixel_size, freq_MHz, max_loss, iters=iters, lam=lam, alpha=alpha)
+    elif method == "los":
+        if trans_mat is None:
+            raise ValueError("LOS backfill requires trans_mat")
+        return _backfill_direct_los(out, cnt, trans_mat, x_ant, y_ant, pixel_size, freq_MHz, max_loss)
+    else:
+        # default to FSPL if unknown
+        return _backfill_fspl(out, cnt, x_ant, y_ant, pixel_size, freq_MHz, max_loss)
 
 # ---------------------------------------------------------------------#
 #  STEP-UNTIL-WALL                                                     #
@@ -133,19 +279,19 @@ def _trace_ray_recursive(
     pixel_size, freq_MHz,
     radial_step, max_dist,
     max_trans, max_refl, max_loss,
-    fspl_lut, use_lut, paint_stride
+    fspl_lut, use_lut
 ):
     # stop if already worse than the budget
     if acc_loss >= max_loss:
         return
 
-    px_hit, py_hit, _, _, travelled, last_val, cur_val = _step_until_wall(
+    px_hit, py_hit, px_prev, py_prev, travelled, last_val, cur_val = _step_until_wall(
         trans_mat, x0, y0, dx, dy, radial_step, max_dist
     )
 
     # ─ paint current segment (min-dB rule) ─
     steps = int(travelled / radial_step) + 1
-    for s in range(paint_stride, steps, paint_stride):  # s=0 would double-paint
+    for s in range(1, steps):  # s=0 would double-paint
         xi = x0 + dx * radial_step * s
         yi = y0 + dy * radial_step * s
         ix = int(round(xi));  iy = int(round(yi))
@@ -165,6 +311,22 @@ def _trace_ray_recursive(
         if tot < out_img[iy, ix]:
             out_img[iy, ix] = tot
         counts[iy, ix] += 1.0                     # keep hit statistics
+
+    # If the segment was too short to paint (travelled < radial_step), paint its endpoint pixel once
+    if steps <= 1:
+        ix = px_prev; iy = py_prev
+        if 0 <= ix < out_img.shape[1] and 0 <= iy < out_img.shape[0]:
+            if use_lut:
+                k = int(global_r + travelled)
+                fspl = _fspl_from_lut(fspl_lut, k)
+            else:
+                fspl = _fspl((global_r + travelled) * pixel_size, freq_MHz)
+            tot = acc_loss + fspl
+            if tot > max_loss:
+                tot = max_loss
+            if tot < out_img[iy, ix]:
+                out_img[iy, ix] = tot
+            counts[iy, ix] += 1.0
 
     # left the map?
     if px_hit < 0:
@@ -193,7 +355,7 @@ def _trace_ray_recursive(
         pixel_size, freq_MHz,
         radial_step, max_dist,
         max_trans, max_refl, max_loss,
-        fspl_lut, use_lut, paint_stride
+        fspl_lut, use_lut
     )
 
     # ─ reflection branch ─
@@ -214,7 +376,7 @@ def _trace_ray_recursive(
                     pixel_size, freq_MHz,
                     radial_step, max_dist,
                     max_trans, max_refl, max_loss,
-                    fspl_lut, use_lut, paint_stride
+                    fspl_lut, use_lut
                 )
 
 
@@ -228,7 +390,6 @@ def calculate_combined_loss_with_normals(
     pixel_size=0.25,
     radial_step=1.0,
     max_loss=160.0,
-    paint_stride=1,
     use_fspl_lut=True
 ):
     h, w = reflectance_mat.shape
@@ -260,16 +421,8 @@ def calculate_combined_loss_with_normals(
             pixel_size, freq_MHz,
             radial_step, max_dist,
             max_trans, max_refl, max_loss,
-            fspl_lut, use_lut, paint_stride
+            fspl_lut, use_lut
         )
-
-    # fill untouched pixels with direct-FSPL
-    for py in prange(h):
-        for px in range(w):
-            if cnt[py, px] == 0:
-                d    = _euclidean_distance(px, py, x_ant, y_ant, pixel_size)
-                fspl = _fspl(d, freq_MHz)
-                out[py, px] = fspl if fspl < max_loss else max_loss
 
     return out, cnt
 
@@ -288,8 +441,6 @@ def _warmup_numba_once():
         n_angles=N_ANGLES,
         max_refl=0, max_trans=1,
         radial_step=1.0,
-        max_loss=160.0,
-        paint_stride=1,
         use_fspl_lut=True
     )
     _WARMED_UP = True
@@ -353,14 +504,6 @@ def calculate_transmission_loss_numpy(trans_mat, x_ant, y_ant, freq_MHz, n_angle
             cnt[py,px] += 1.0
             r += radial_step
 
-    # Fill untouched pixels with direct-FSPL (same as combined method)
-    for py in prange(h):
-        for px in range(w):
-            if cnt[py, px] == 0:
-                d    = _euclidean_distance(px, py, x_ant, y_ant, pixel_size)
-                fspl = _fspl(d, freq_MHz)
-                out[py,px] = fspl if fspl < max_loss else max_loss
-
     return out, cnt
 
 # ---------------------------------------------------------------------#
@@ -383,36 +526,38 @@ class Approx:
         trans_c = np.ascontiguousarray(trans, dtype=np.float64)
 
         if self.method == 'combined':
-            feat, _ = calculate_combined_loss_with_normals(
+            feat, cnt = calculate_combined_loss_with_normals(
                 ref_c, trans_c, nx_img, ny_img,
                 x, y, f,
                 n_angles=N_ANGLES,
                 max_refl=max_refl,
                 max_trans=max_trans,
                 radial_step=1.0,
-                paint_stride=1,
                 use_fspl_lut=True
             )
+            feat = apply_backfill(feat, cnt, x, y, 0.25, f, 160.0, BACKFILL_METHOD, BACKFILL_PARAMS, trans_mat=trans_c)
         elif self.method == 'combined_fast':
             # Aggressive speed settings; expect some accuracy loss
             fast_refl = max_refl if max_refl < 3 else 3
-            feat, _ = calculate_combined_loss_with_normals(
+            feat, cnt = calculate_combined_loss_with_normals(
                 ref_c, trans_c, nx_img, ny_img,
                 x, y, f,
                 n_angles=N_ANGLES,
                 max_refl=fast_refl,
                 max_trans=max_trans,
                 radial_step=1.0,
-                paint_stride=8,
                 use_fspl_lut=True
             )
+            feat = apply_backfill(feat, cnt, x, y, 0.25, f, 160.0, BACKFILL_METHOD, BACKFILL_PARAMS, trans_mat=trans_c)
         elif self.method == 'beamtrace':
             from beamtrace import calculate_beamtrace_loss_with_normals  # local import to avoid cyclic jit cost
             feat, _ = calculate_beamtrace_loss_with_normals(
                 ref_c, trans_c, nx_img, ny_img, x, y, f,
                 max_refl=max_refl, max_trans=max_trans)
         else:
-            feat, _ = calculate_transmission_loss_numpy(trans_c, x, y, f, max_walls=max_trans)
+            feat, cnt = calculate_transmission_loss_numpy(trans_c, x, y, f, n_angles=360*128, max_walls=max_trans)
+            feat = feat.astype(np.float32)
+            feat = apply_backfill(feat, cnt.astype(np.float32), x, y, 0.25, f, 160.0, BACKFILL_METHOD, BACKFILL_PARAMS, trans_mat=trans_c)
         feat = np.minimum(feat, 160.0)
         return torch.from_numpy(np.floor(feat))
 
@@ -427,15 +572,18 @@ if __name__ == "__main__":
     import argparse
 
     parser = argparse.ArgumentParser("Approximation demo")
-    parser.add_argument("-N", type=int, default=10, help="number of random samples to load")
+    parser.add_argument("-N", type=int, default=200, help="number of random samples to load")
+    parser.add_argument("--seed", type=str, default=None, help="random seed; use 'None' for fully random each run")
     parser.add_argument("--compare0", action="store_true",
                         help="generate zero-reflection combined vs transmission comparison (val.png)")
     parser.add_argument("--hits", action="store_true",
                         help="generate hit-count plots (hit_counts.png)")
+    parser.add_argument("--viz_k", type=int, default=12, help="number of samples to show in viz.png (top-|ΔRMSE|)")
     args = parser.parse_args()
 
     N = args.N
-    samples = load_samples(num_samples=N)
+    seed = None if args.seed is None or str(args.seed).lower() == 'none' else int(args.seed)
+    samples = load_samples(num_samples=N, seed=seed)
 
     # --- optional zero-reflection / hit-count diagnostics ---
     if args.compare0 or args.hits:
@@ -455,8 +603,9 @@ if __name__ == "__main__":
             n_angles=N_ANGLES,
             max_refl=0, max_trans=MAX_TRANS,
             radial_step=1.0,
-            paint_stride=1,
             use_fspl_lut=True)
+        # Apply backfill to combined for fair comparison
+        cmb_map = apply_backfill(cmb_map.astype(np.float32), cmb_cnt.astype(np.float32), x, y, 0.25, f, 160.0, BACKFILL_METHOD, BACKFILL_PARAMS, trans_mat=trans)
 
         if args.compare0:
             compare_two_matrices(cmb_map, tx_map,
@@ -483,43 +632,79 @@ if __name__ == "__main__":
     # ────────────────────────────────────────────────────────────
     # Visual comparison (generic): GT + each approximator + all
     # unique pairwise diff images. Diff is shown as |A-B| in gray.
+    # Select top-|ΔRMSE| samples to visualize.
     # ────────────────────────────────────────────────────────────
     import matplotlib.pyplot as plt
     import itertools
+    import numpy as _np
 
-    n_show = min(3, N)
+    n_show = min(args.viz_k, N)
     base_names = ["GT", "Combined", "Tx-Only"]
 
-    for idx in range(n_show):
+    # sort indices by absolute RMSE difference between methods
+    diffs_rmse = _np.abs(_np.array(rms_c) - _np.array(rms_t))
+    top_idx = _np.argsort(-diffs_rmse)[:n_show]
+
+    # For selected samples, compute and print untouched pixel counts using the same params
+    mask_c0 = {}
+    mask_t0 = {}
+    for idx in top_idx:
+        ref, trans, _in = samples[idx].input_img.cpu().numpy()
+        x, y, f = samples[idx].x_ant, samples[idx].y_ant, samples[idx].freq_MHz
+        b_id = samples[idx].ids[0] if samples[idx].ids else 0
+        nx_i, ny_i = load_precomputed_normals_for_building(b_id, ref, trans)
+        _, cnt_comb = calculate_combined_loss_with_normals(
+            ref, trans, nx_i, ny_i, x, y, f,
+            n_angles=N_ANGLES,
+            max_refl=MAX_REFL, max_trans=MAX_TRANS,
+            radial_step=1.0,
+            use_fspl_lut=True)
+        _, cnt_tx = calculate_transmission_loss_numpy(
+            trans, x, y, f, n_angles=360*128, max_walls=MAX_TRANS)
+        total = cnt_comb.shape[0] * cnt_comb.shape[1]
+        untouched_c = int((_np.sum(cnt_comb == 0)).item())
+        untouched_t = int((_np.sum(cnt_tx == 0)).item())
+        pct_c = 100.0 * untouched_c / total
+        pct_t = 100.0 * untouched_t / total
+        print(f"Untouched pixels [sample {idx}]: combined={untouched_c} ({pct_c:.2f}%), tx-only={untouched_t} ({pct_t:.2f}%)")
+        mask_c0[idx] = (cnt_comb == 0)
+        mask_t0[idx] = (cnt_tx == 0)
+
+    for row, idx in enumerate(top_idx):
         mats = [samples[idx].output_img, preds_comb[idx], preds_tx[idx]]
 
         # pairwise diffs
         diffs = []
         diff_titles = []
         for (a, b) in itertools.combinations(range(len(mats)), 2):
-            diffs.append(np.abs(mats[a] - mats[b]))
+            diffs.append(_np.abs(mats[a] - mats[b]))
             diff_titles.append(f"|{base_names[a][0]}-{base_names[b][0]}|")
 
-        row_mats   = mats + diffs
+        # add cnt==0 masks for a quick visual check
+        masks = [mask_c0[idx].astype(_np.float32), mask_t0[idx].astype(_np.float32)]
+        mask_titles = ["C0", "T0"]
+
+        row_mats   = mats + diffs + masks
         row_titles = base_names.copy()
         # append RMSE for approximators in titles
         row_titles[1] = f"Combined ({rmse(mats[1], mats[0]):.2f})"
         row_titles[2] = f"Tx-Only ({rmse(mats[2], mats[0]):.2f})"
         row_titles.extend(diff_titles)
+        row_titles.extend(mask_titles)
 
-        if idx == 0:
+        if row == 0:
             # create figure with dynamic column count after knowing sizes
             n_cols = len(row_mats)
             fig, axes = plt.subplots(n_show, n_cols, figsize=(4 * n_cols, 4 * n_show))
-            import numpy as _np
             axes = _np.atleast_2d(axes)
 
         for col, (mat, title) in enumerate(zip(row_mats, row_titles)):
-            ax = axes[idx, col]
+            ax = axes[row, col]
             if col < len(mats):
                 im = ax.imshow(mat, vmax=160)
             else:
-                im = ax.imshow(mat, cmap='gray')  # diff
+                # grayscale for diffs and masks
+                im = ax.imshow(mat, cmap='gray', vmin=0, vmax=1 if mat.dtype!=_np.float64 and mat.max()<=1.0 else None)
             ax.set_title(title)
             ax.axis('off')
             fig.colorbar(im, ax=ax, fraction=0.04)
