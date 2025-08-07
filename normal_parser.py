@@ -217,6 +217,46 @@ def _debug_plot_window(building_mask, px, py, win=5, angle1=None, angle2=None, s
     plt.show()
 
 
+# simple python helper (non-numba) to test if two-line split exists
+def _detect_two_lines(building_mask, px, py, win=5, dist_th=1.0, merge_th=20.0):
+    h, w = building_mask.shape
+    y0, y1 = max(py - win, 0), min(py + win + 1, h)
+    x0, x1 = max(px - win, 0), min(px + win + 1, w)
+    patch = building_mask[y0:y1, x0:x1]
+    ys, xs = np.nonzero(patch)
+    n = xs.size
+    if n < 6:
+        return None
+    xs = xs.astype(np.float32) + x0
+    ys = ys.astype(np.float32) + y0
+
+    angle1 = _pca_angle_weighted_centered(xs, ys, px, py, 1.0)
+    rad1 = math.radians(angle1)
+    c1 = math.cos(rad1)
+    s1 = math.sin(rad1)
+
+    xs2 = []
+    ys2 = []
+    for i in range(n):
+        dx = xs[i] - px
+        dy = ys[i] - py
+        dist = abs(-s1 * dx + c1 * dy)
+        if dist > dist_th:
+            xs2.append(xs[i])
+            ys2.append(ys[i])
+
+    if len(xs2) < 3:
+        return None
+
+    xs2 = np.array(xs2, dtype=np.float32)
+    ys2 = np.array(ys2, dtype=np.float32)
+    angle2 = _pca_angle(xs2, ys2)
+    diff = abs(((angle1 - angle2 + 90.0) % 180.0) - 90.0)
+    if diff < merge_th:
+        return None
+    return angle1, angle2
+
+
 @njit(cache=True)
 def compute_wall_angle_multiscale_pca(img, px, py):
     """
@@ -445,13 +485,18 @@ if __name__ == "__main__":
     
     print(f"\nSaved: wall_angles_multiscale.png") 
 
-    # debug plot for few random pixels
-    np.random.seed(0)
+    # try to show up to 6 double-line windows
     wy, wx = np.where(building_mask > 0)
-    if len(wx) > 0:
-        idxs = np.random.choice(len(wx), size=min(3, len(wx)), replace=False)
-        for idx in idxs:
-            px = int(wx[idx])
-            py = int(wy[idx])
-            ang = compute_wall_angle_pca(building_mask, px, py, 5)
-            _debug_plot_window(building_mask, px, py, 5, angle1=ang) 
+    shown = 0
+    rng = np.random.default_rng(0)
+    perm = rng.permutation(len(wx))
+    for idx in perm:
+        px = int(wx[idx])
+        py = int(wy[idx])
+        res = _detect_two_lines(building_mask, px, py, 5)
+        if res is not None:
+            a1, a2 = res
+            _debug_plot_window(building_mask, px, py, 5, angle1=a1, angle2=a2)
+            shown += 1
+            if shown >= 6:
+                break 
