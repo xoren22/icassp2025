@@ -35,6 +35,56 @@ def _pca_angle(xs, ys):
     return angle_deg
 
 
+@njit(cache=True, inline='always')
+def _pca_angle_trimmed(xs, ys):
+    """
+    Robust PCA angle using trimmed fitting.
+    1. Initial PCA fit
+    2. Remove worst 20% of points (furthest from line)
+    3. Refit PCA on remaining 80%
+    """
+    n = xs.size
+    if n < 3:
+        return _pca_angle(xs, ys)  # Too few points for trimming
+    
+    # Step 1: Initial PCA fit
+    initial_angle = _pca_angle(xs, ys)
+    
+    # Step 2: Compute distances to initial line
+    # Line equation: y = mx + b where m = tan(angle)
+    angle_rad = math.radians(initial_angle)
+    
+    # For vertical lines (angle near 90°), use x = c form
+    if abs(initial_angle - 90.0) < 1.0:
+        # Vertical line: x = constant
+        line_x = xs.mean()
+        distances = np.abs(xs - line_x)
+    else:
+        # Non-vertical line: y = mx + b
+        m = math.tan(angle_rad)
+        # Find b using centroid: y_mean = m * x_mean + b
+        b = ys.mean() - m * xs.mean()
+        
+        # Distance from point (x,y) to line mx - y + b = 0
+        # is |mx - y + b| / sqrt(m² + 1)
+        norm_factor = math.sqrt(m * m + 1.0)
+        distances = np.abs(m * xs - ys + b) / norm_factor
+    
+    # Step 3: Keep best 80% (smallest distances)
+    keep_count = max(3, int(0.8 * n))  # Keep at least 3 points
+    if keep_count >= n:
+        return initial_angle  # No trimming needed
+    
+    # Find indices of points with smallest distances
+    indices = np.argsort(distances)[:keep_count]
+    
+    # Step 4: Refit PCA on trimmed points
+    xs_trimmed = xs[indices]
+    ys_trimmed = ys[indices]
+    
+    return _pca_angle(xs_trimmed, ys_trimmed)
+
+
 @njit(cache=True)
 def compute_wall_angle_pca(img, px, py, win=5):
     """
@@ -55,8 +105,8 @@ def compute_wall_angle_pca(img, px, py, win=5):
         xs = xs.astype(np.float32) + x0
         ys = ys.astype(np.float32) + y0
         
-        # Get wall direction from PCA
-        wall_angle_deg = _pca_angle(xs, ys)
+        # Get wall direction from robust trimmed PCA
+        wall_angle_deg = _pca_angle_trimmed(xs, ys)
         return wall_angle_deg
 
 
@@ -219,7 +269,7 @@ if __name__ == "__main__":
     refl, trans, _ = sample.input_img.cpu().numpy()
     building_mask = (refl + trans > 0).astype(np.uint8)
 
-    print(f"Computing multi-scale PCA wall angles for Building {building_id}...")
+    print(f"Computing trimmed multi-scale PCA wall angles for Building {building_id}...")
     
     # Multi-scale PCA method
     wall_angles = precompute_wall_angles_pca(building_mask)
@@ -227,8 +277,8 @@ if __name__ == "__main__":
     # Visualize results
     visualize_wall_angles(
         building_mask, wall_angles,
-        title=f"Multi-Scale PCA Wall Angles (Building {building_id})",
-        sample_prob=0.9,
+        title=f"Trimmed Multi-Scale PCA Wall Angles (Building {building_id})",
+        sample_prob=0.5,
         save_path="wall_angles_multiscale.png"
     )
     
@@ -243,7 +293,7 @@ if __name__ == "__main__":
     
     print(f"\nResults:")
     print(f"Total wall pixels: {total_walls}")
-    print(f"Multi-scale PCA coverage: {valid_angles}/{total_walls} ({valid_angles/total_walls*100:.1f}%)")
+    print(f"Trimmed multi-scale PCA coverage: {valid_angles}/{total_walls} ({valid_angles/total_walls*100:.1f}%)")
     
     if valid_angles > 0:
         valid_wall_angles = wall_angles_at_walls[wall_angles_at_walls >= 0]
