@@ -85,29 +85,136 @@ def _pca_angle_trimmed(xs, ys):
     return _pca_angle(xs_trimmed, ys_trimmed)
 
 
+# distance-weighted PCA centered at source pixel
+@njit(cache=True, inline='always')
+def _pca_angle_weighted_centered(xs, ys, px, py, distance_power=1.0):
+    n = xs.size
+    if n < 3:
+        return _pca_angle(xs, ys)
+
+    dx = xs - px
+    dy = ys - py
+
+    distances = np.sqrt(dx * dx + dy * dy)
+    weights = np.empty(n, dtype=np.float32)
+    for i in range(n):
+        d = distances[i]
+        if d < 1e-6:
+            weights[i] = 10.0
+        else:
+            weights[i] = 1.0 / (d ** distance_power)
+
+    wsum = weights.sum()
+    sxx = 0.0
+    syy = 0.0
+    sxy = 0.0
+    for i in range(n):
+        w = weights[i] / wsum
+        sxx += w * dx[i] * dx[i]
+        syy += w * dy[i] * dy[i]
+        sxy += w * dx[i] * dy[i]
+
+    ang = 0.5 * math.atan2(2.0 * sxy, sxx - syy)
+    return math.degrees(ang) % 180.0
+
+
 @njit(cache=True)
 def compute_wall_angle_pca(img, px, py, win=5):
-    """
-    PCA-based wall angle estimator for a single window size.
-    
-    Returns: wall angle in degrees (0-180°), or -1 if insufficient data
-    """
     h, w = img.shape
     y0, y1 = max(py - win, 0), min(py + win + 1, h)
     x0, x1 = max(px - win, 0), min(px + win + 1, w)
-    patch = img[y0:y1, x0:x1]
 
-    ys, xs = np.nonzero(patch)          # local wall pixels
-    if xs.size < 3:                     # too sparse
+    patch = img[y0:y1, x0:x1]
+    ys, xs = np.nonzero(patch)
+    n = xs.size
+    if n < 3:
         return -1.0
-    else:
-        # Convert to global coordinates
-        xs = xs.astype(np.float32) + x0
-        ys = ys.astype(np.float32) + y0
-        
-        # Get wall direction from robust trimmed PCA
-        wall_angle_deg = _pca_angle_trimmed(xs, ys)
-        return wall_angle_deg
+
+    xs = xs.astype(np.float32) + x0
+    ys = ys.astype(np.float32) + y0
+
+    # First line using weighted PCA centred at (px,py)
+    angle1 = _pca_angle_weighted_centered(xs, ys, px, py, 1.0)
+
+    rad1 = math.radians(angle1)
+    c1 = math.cos(rad1)
+    s1 = math.sin(rad1)
+
+    # Split points into two sets based on distance to line1
+    dt = 1.0
+    xs1 = np.empty(n, dtype=np.float32)
+    ys1 = np.empty(n, dtype=np.float32)
+    xs2 = np.empty(n, dtype=np.float32)
+    ys2 = np.empty(n, dtype=np.float32)
+    c1_idx = 0
+    c2_idx = 0
+
+    for i in range(n):
+        dx = xs[i] - px
+        dy = ys[i] - py
+        dist = abs(-s1 * dx + c1 * dy)
+        if dist <= dt:
+            xs1[c1_idx] = xs[i]
+            ys1[c1_idx] = ys[i]
+            c1_idx += 1
+        else:
+            xs2[c2_idx] = xs[i]
+            ys2[c2_idx] = ys[i]
+            c2_idx += 1
+
+    if c2_idx < 3:
+        # Only one wall present
+        return angle1
+
+    # Compute second line on remaining points
+    xs2 = xs2[:c2_idx]
+    ys2 = ys2[:c2_idx]
+    angle2 = _pca_angle(xs2, ys2)
+
+    # Angle difference
+    diff = abs(((angle1 - angle2 + 90.0) % 180.0) - 90.0)
+
+    merge_th = 20.0
+    if diff < merge_th:
+        # Treat as same wall
+        return angle1
+
+    # Keep only cluster that contains source pixel (cluster1)
+    if c1_idx < 3:
+        return angle1
+
+    xs1 = xs1[:c1_idx]
+    ys1 = ys1[:c1_idx]
+    final_angle = _pca_angle_weighted_centered(xs1, ys1, px, py, 1.0)
+    return final_angle
+
+
+# debug
+def _debug_plot_window(building_mask, px, py, win=5, angle1=None, angle2=None, save_path=None):
+    import matplotlib.pyplot as plt
+    y0, y1 = max(py - win, 0), min(py + win + 1, building_mask.shape[0])
+    x0, x1 = max(px - win, 0), min(px + win + 1, building_mask.shape[1])
+    patch = building_mask[y0:y1, x0:x1]
+
+    fig, ax = plt.subplots(figsize=(4, 4))
+    ax.imshow(patch, cmap='gray', origin='upper')
+    ax.plot(px - x0, py - y0, 'ro')
+
+    if angle1 is not None:
+        rad = math.radians(angle1)
+        dx = math.cos(rad)
+        dy = math.sin(rad)
+        ax.quiver(px - x0, py - y0, dx, dy, color='cyan', scale_units='xy', scale=1, width=0.005)
+    if angle2 is not None:
+        rad = math.radians(angle2)
+        dx = math.cos(rad)
+        dy = math.sin(rad)
+        ax.quiver(px - x0, py - y0, dx, dy, color='yellow', scale_units='xy', scale=1, width=0.005)
+    ax.set_title(f"({px},{py})")
+    ax.set_axis_off()
+    if save_path:
+        plt.savefig(save_path, dpi=120, bbox_inches='tight')
+    plt.show()
 
 
 @njit(cache=True)
@@ -306,7 +413,7 @@ if __name__ == "__main__":
     refl, trans, _ = sample.input_img.cpu().numpy()
     building_mask = (refl + trans > 0).astype(np.uint8)
 
-    print(f"Computing trimmed multi-scale PCA wall angles for Building {building_id}...")
+    print(f"Computing split-line multi-scale PCA wall angles for Building {building_id}...")
     
     # Multi-scale PCA method
     wall_angles = precompute_wall_angles_pca(building_mask)
@@ -330,10 +437,21 @@ if __name__ == "__main__":
     
     print(f"\nResults:")
     print(f"Total wall pixels: {total_walls}")
-    print(f"Trimmed multi-scale PCA coverage: {valid_angles}/{total_walls} ({valid_angles/total_walls*100:.1f}%)")
+    print(f"Split-line multi-scale PCA coverage: {valid_angles}/{total_walls} ({valid_angles/total_walls*100:.1f}%)")
     
     if valid_angles > 0:
         valid_wall_angles = wall_angles_at_walls[wall_angles_at_walls >= 0]
         print(f"Angle range: {valid_wall_angles.min():.1f}° to {valid_wall_angles.max():.1f}°")
     
     print(f"\nSaved: wall_angles_multiscale.png") 
+
+    # debug plot for few random pixels
+    np.random.seed(0)
+    wy, wx = np.where(building_mask > 0)
+    if len(wx) > 0:
+        idxs = np.random.choice(len(wx), size=min(3, len(wx)), replace=False)
+        for idx in idxs:
+            px = int(wx[idx])
+            py = int(wy[idx])
+            ang = compute_wall_angle_pca(building_mask, px, py, 5)
+            _debug_plot_window(building_mask, px, py, 5, angle1=ang) 
