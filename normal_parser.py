@@ -270,7 +270,7 @@ def compute_wall_angle_multiscale_pca(img, px, py):
     h, w = img.shape
     
     # Try multiple window sizes (small to large)
-    window_sizes = np.array([5, 6])
+    window_sizes = np.array([11, 12])
     angles = np.zeros(len(window_sizes), dtype=np.float32)
     valid_count = 0
     
