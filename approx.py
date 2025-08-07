@@ -41,7 +41,7 @@ def load_precomputed_normals_for_building(building_id: int, refl: np.ndarray, tr
 # ---------------------------------------------------------------------#
 MAX_REFL  = 5            # reflection budget for normal runs
 MAX_TRANS = 15           # transmission (wall) budget
-
+N_ANGLES  = 360*32       # single place to control angular resolution for combined method
 # ---------------------------------------------------------------------#
 #  NUMERIC BASICS                                                      #
 # ---------------------------------------------------------------------#
@@ -53,6 +53,27 @@ def calculate_fspl(dist_m, freq_MHz, min_dist_m=0.125):
 def _fspl(dist_m: float, freq_MHz: float, min_dist_m: float = 0.125) -> float:
     d = dist_m if dist_m > min_dist_m else min_dist_m
     return 20.0*np.log10(d) + 20.0*np.log10(freq_MHz) - 27.55
+
+# Fast FSPL lookup table to avoid log10 in inner loops
+@njit(cache=True)
+def _build_fspl_lut(max_steps: int, pixel_size: float, freq_MHz: float, min_dist_m: float = 0.125):
+    lut = np.empty(max_steps + 1, np.float64)
+    for k in range(max_steps + 1):
+        d = k * pixel_size
+        if d < min_dist_m:
+            d = min_dist_m
+        lut[k] = 20.0*np.log10(d) + 20.0*np.log10(freq_MHz) - 27.55
+    return lut
+
+@njit(inline='always')
+def _fspl_from_lut(lut: np.ndarray, step_index: int) -> float:
+    # clamps index to [0, len-1]
+    if step_index < 0:
+        step_index = 0
+    n = lut.shape[0]
+    if step_index >= n:
+        step_index = n - 1
+    return lut[step_index]
 
 @njit(inline='always')
 def _euclidean_distance(px, py, x_ant, y_ant, pixel_size=0.25):
@@ -111,7 +132,8 @@ def _trace_ray_recursive(
     global_r,                           # px distance so far
     pixel_size, freq_MHz,
     radial_step, max_dist,
-    max_trans, max_refl, max_loss
+    max_trans, max_refl, max_loss,
+    fspl_lut, use_lut, paint_stride
 ):
     # stop if already worse than the budget
     if acc_loss >= max_loss:
@@ -123,14 +145,18 @@ def _trace_ray_recursive(
 
     # ─ paint current segment (min-dB rule) ─
     steps = int(travelled / radial_step) + 1
-    for s in range(1, steps):                       # s=0 would double-paint
+    for s in range(paint_stride, steps, paint_stride):  # s=0 would double-paint
         xi = x0 + dx * radial_step * s
         yi = y0 + dy * radial_step * s
         ix = int(round(xi));  iy = int(round(yi))
         if ix < 0 or ix >= out_img.shape[1] or iy < 0 or iy >= out_img.shape[0]:
             break
 
-        fspl = _fspl((global_r + radial_step * s) * pixel_size, freq_MHz)
+        if use_lut:
+            k = int(global_r + s)  # valid when radial_step == 1.0
+            fspl = _fspl_from_lut(fspl_lut, k)
+        else:
+            fspl = _fspl((global_r + radial_step * s) * pixel_size, freq_MHz)
         tot  = acc_loss + fspl
         if tot > max_loss:
             tot = max_loss
@@ -156,6 +182,7 @@ def _trace_ray_recursive(
     new_y = y0 + dy * travelled
     new_r = global_r + travelled
 
+    
     # ─ straight continuation ─
     _trace_ray_recursive(
         refl_mat, trans_mat, nx_img, ny_img,
@@ -165,7 +192,8 @@ def _trace_ray_recursive(
         acc_loss, new_r,
         pixel_size, freq_MHz,
         radial_step, max_dist,
-        max_trans, max_refl, max_loss
+        max_trans, max_refl, max_loss,
+        fspl_lut, use_lut, paint_stride
     )
 
     # ─ reflection branch ─
@@ -185,7 +213,8 @@ def _trace_ray_recursive(
                     new_r,
                     pixel_size, freq_MHz,
                     radial_step, max_dist,
-                    max_trans, max_refl, max_loss
+                    max_trans, max_refl, max_loss,
+                    fspl_lut, use_lut, paint_stride
                 )
 
 
@@ -194,19 +223,30 @@ def _trace_ray_recursive(
 def calculate_combined_loss_with_normals(
     reflectance_mat, transmittance_mat, nx_img, ny_img,
     x_ant, y_ant, freq_MHz,
+    n_angles,
     max_refl=MAX_REFL, max_trans=MAX_TRANS,
     pixel_size=0.25,
-    n_angles=360*128*1, radial_step=1.0,
-    max_loss=160.0
+    radial_step=1.0,
+    max_loss=160.0,
+    paint_stride=1,
+    use_fspl_lut=True
 ):
     h, w = reflectance_mat.shape
-    out  = np.full((h, w), max_loss, np.float64)
+    out  = np.full((h, w), max_loss, np.float32)
     cnt  = np.zeros((h, w), np.float32)
 
     dtheta   = 2.0 * np.pi / n_angles
     max_dist = np.hypot(w, h)
     cos_v    = np.cos(np.arange(n_angles) * dtheta)
     sin_v    = np.sin(np.arange(n_angles) * dtheta)
+
+    # FSPL LUT only valid when radial_step == 1.0 (indexes by integer step count)
+    use_lut = use_fspl_lut and (radial_step == 1.0)
+    if use_lut:
+        max_steps = int(max_dist) + 2
+        fspl_lut = _build_fspl_lut(max_steps, pixel_size, freq_MHz)
+    else:
+        fspl_lut = np.zeros(1, np.float64)  # dummy to satisfy typing
 
     for i in prange(n_angles):
         _trace_ray_recursive(
@@ -219,7 +259,8 @@ def calculate_combined_loss_with_normals(
             0.0, 0.0,
             pixel_size, freq_MHz,
             radial_step, max_dist,
-            max_trans, max_refl, max_loss
+            max_trans, max_refl, max_loss,
+            fspl_lut, use_lut, paint_stride
         )
 
     # fill untouched pixels with direct-FSPL
@@ -244,9 +285,12 @@ def _warmup_numba_once():
     calculate_combined_loss_with_normals(
         zero, trans, nx, ny,
         x_ant=4.0, y_ant=4.0, freq_MHz=1000.0,
+        n_angles=N_ANGLES,
         max_refl=0, max_trans=1,
-        n_angles=16, radial_step=1.0,
-        max_loss=160.0
+        radial_step=1.0,
+        max_loss=160.0,
+        paint_stride=1,
+        use_fspl_lut=True
     )
     _WARMED_UP = True
 
@@ -342,8 +386,25 @@ class Approx:
             feat, _ = calculate_combined_loss_with_normals(
                 ref_c, trans_c, nx_img, ny_img,
                 x, y, f,
+                n_angles=N_ANGLES,
                 max_refl=max_refl,
-                max_trans=max_trans
+                max_trans=max_trans,
+                radial_step=1.0,
+                paint_stride=1,
+                use_fspl_lut=True
+            )
+        elif self.method == 'combined_fast':
+            # Aggressive speed settings; expect some accuracy loss
+            fast_refl = max_refl if max_refl < 3 else 3
+            feat, _ = calculate_combined_loss_with_normals(
+                ref_c, trans_c, nx_img, ny_img,
+                x, y, f,
+                n_angles=N_ANGLES,
+                max_refl=fast_refl,
+                max_trans=max_trans,
+                radial_step=1.0,
+                paint_stride=8,
+                use_fspl_lut=True
             )
         elif self.method == 'beamtrace':
             from beamtrace import calculate_beamtrace_loss_with_normals  # local import to avoid cyclic jit cost
@@ -391,8 +452,11 @@ if __name__ == "__main__":
         nx0, ny0 = load_precomputed_normals_for_building(b_id, ref, trans)
         cmb_map, cmb_cnt = calculate_combined_loss_with_normals(
             ref, trans, nx0, ny0, x, y, f,
+            n_angles=N_ANGLES,
             max_refl=0, max_trans=MAX_TRANS,
-            n_angles=360*128)
+            radial_step=1.0,
+            paint_stride=1,
+            use_fspl_lut=True)
 
         if args.compare0:
             compare_two_matrices(cmb_map, tx_map,
