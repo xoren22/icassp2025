@@ -123,7 +123,7 @@ def compute_wall_angle_multiscale_pca(img, px, py):
     h, w = img.shape
     
     # Try multiple window sizes (small to large)
-    window_sizes = np.array([2, 3, 4, 5, 6])
+    window_sizes = np.array([5, 6])
     angles = np.zeros(len(window_sizes), dtype=np.float32)
     valid_count = 0
     
@@ -226,8 +226,42 @@ def visualize_wall_angles(
     # Convert wall angles to normal vectors for visualization
     # Normal is perpendicular to wall (wall_angle + 90°)
     normal_angles_rad = np.radians(sampled_angles + 90)
-    sampled_nx = np.cos(normal_angles_rad)
-    sampled_ny = np.sin(normal_angles_rad)
+    nx_raw = np.cos(normal_angles_rad)
+    ny_raw = np.sin(normal_angles_rad)
+    
+    # Find center of building floor (centroid of empty space)
+    empty_y, empty_x = np.where(building_mask == 0)
+    if len(empty_x) > 0:
+        center_x = empty_x.mean()
+        center_y = empty_y.mean()
+    else:
+        # Fallback if no empty space found
+        h, w = building_mask.shape
+        center_x, center_y = w/2, h/2
+    
+    # For each arrow, pick direction pointing toward building center
+    sampled_nx = np.zeros_like(nx_raw)
+    sampled_ny = np.zeros_like(ny_raw)
+    
+    for i in range(len(sampled_x)):
+        # Vector from wall pixel to building center
+        to_center_x = center_x - sampled_x[i]
+        to_center_y = center_y - sampled_y[i]
+        
+        # Test both normal directions
+        normal_1 = (nx_raw[i], ny_raw[i])
+        normal_2 = (-nx_raw[i], -ny_raw[i])
+        
+        # Pick direction with positive dot product toward building center
+        dot_1 = normal_1[0] * to_center_x + normal_1[1] * to_center_y
+        dot_2 = normal_2[0] * to_center_x + normal_2[1] * to_center_y
+        
+        if dot_1 > dot_2:
+            sampled_nx[i] = normal_1[0]
+            sampled_ny[i] = normal_1[1]
+        else:
+            sampled_nx[i] = normal_2[0]
+            sampled_ny[i] = normal_2[1]
 
     fig, ax = plt.subplots(figsize=(12, 12))
     ax.imshow(building_mask, cmap='gray', origin='upper')
@@ -249,6 +283,9 @@ def visualize_wall_angles(
         headwidth=4,
     )
 
+    # Draw the building center point
+    ax.plot(center_x, center_y, 'ro', markersize=8, markeredgecolor='white', markeredgewidth=2, label='Building Center')
+    
     ax.set_title(title)
     ax.set_aspect('equal')
     plt.axis('off')
