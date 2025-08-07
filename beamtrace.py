@@ -8,7 +8,6 @@ from approx import (
     _fspl,
     _euclidean_distance,
     _step_until_wall,
-    _precompute_normals_pca,
     _estimate_normal,
     _reflect_dir,
 )
@@ -125,39 +124,40 @@ def _trace_ray_recursive_beam(
 
     # ---------------- reflection branch --------------------
     if refl_ct < max_refl:
-        nx, ny = _estimate_normal(nx_img, ny_img, px_hit, py_hit)
-        if nx != 0.0 or ny != 0.0:
-            rdx, rdy = _reflect_dir(dx, dy, nx, ny)
-            _trace_ray_recursive_beam(
-                refl_mat, trans_mat, nx_img, ny_img,
-                out_img, counts,
-                new_x, new_y, rdx, rdy,
-                trans_ct, refl_ct + 1,
-                acc_loss + refl_mat[py_hit, px_hit],
-                new_r,
-                pixel_size, freq_MHz,
-                radial_step, max_dist,
-                max_trans, max_refl, max_loss,
-                beam_side, 0,      # collapse beam on reflection
-            )
+        # reflect only at reflective walls
+        refl_val = refl_mat[py_hit, px_hit]
+        if refl_val > 0.0:
+            nx, ny = _estimate_normal(nx_img, ny_img, px_hit, py_hit)
+            if nx != 0.0 or ny != 0.0:
+                rdx, rdy = _reflect_dir(dx, dy, nx, ny)
+                _trace_ray_recursive_beam(
+                    refl_mat, trans_mat, nx_img, ny_img,
+                    out_img, counts,
+                    new_x, new_y, rdx, rdy,
+                    trans_ct, refl_ct + 1,
+                    acc_loss + refl_val,
+                    new_r,
+                    pixel_size, freq_MHz,
+                    radial_step, max_dist,
+                    max_trans, max_refl, max_loss,
+                    beam_side, 0,      # collapse beam on reflection
+                )
 
 
 @njit(parallel=True, fastmath=True, nogil=True, boundscheck=False)
-def calculate_beamtrace_loss(
-    reflectance_mat, transmittance_mat,
+def calculate_beamtrace_loss_with_normals(
+    reflectance_mat, transmittance_mat, nx_img, ny_img,
     x_ant, y_ant, freq_MHz,
-    beam_side=1,                     # neighbours per side → width = 2*beam_side+1
+    beam_side=3,                     # neighbours per side → width = 2*beam_side+1
     max_refl=MAX_REFL, max_trans=MAX_TRANS,
     pixel_size=0.25,
     n_angles=360*128, radial_step=1.0,
-    max_loss=160.0, pca_win=10,
+    max_loss=160.0,
 ):
-    """Ray tracing with a finite-width beam ("beamtrace")."""
+    """Ray tracing with a finite-width beam (beamtrace) using provided normals."""
     h, w = reflectance_mat.shape
     out  = np.full((h, w), max_loss, np.float64)
     cnt  = np.zeros((h, w), np.float32)
-
-    nx_img, ny_img = _precompute_normals_pca(reflectance_mat, pca_win)
 
     dtheta   = 2.0 * np.pi / n_angles
     max_dist = np.hypot(w, h)
