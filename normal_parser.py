@@ -587,6 +587,8 @@ if __name__ == "__main__":
         sample_prob=0.5,
         save_path="wall_angles_multiscale.png",
         orientation_mode="local",
+        local_orientation_radius=12,
+        local_orientation_iters=3,
     )
     
     # Print stats (fix coverage calculation - 0° is valid!)
