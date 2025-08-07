@@ -403,7 +403,74 @@ def precompute_wall_angles_pca(building_mask: np.ndarray) -> np.ndarray:
     return angles_img
 
 
+# --- Visualization helpers ---
 
+def _orient_normals_locally(xs, ys, nx, ny, radius=8, iters=2):
+    """Orient ambiguous normals locally so neighboring arrows share direction.
+    xs, ys: arrays of sample positions
+    nx, ny: unit normals (sign ambiguous)
+    radius: neighborhood radius in pixels
+    iters:  number of propagation rounds
+    Returns signed normals (nx_aligned, ny_aligned).
+    """
+    n = xs.shape[0]
+    if n == 0:
+        return nx, ny
+
+    # Initial signs (keep as-is)
+    signs = np.ones(n, dtype=np.int8)
+
+    # Bin points into a coarse grid to avoid O(N^2)
+    cell = max(1, int(radius))
+    bins = {}
+    for i in range(n):
+        bx = int(xs[i]) // cell
+        by = int(ys[i]) // cell
+        key = (bx, by)
+        if key in bins:
+            bins[key].append(i)
+        else:
+            bins[key] = [i]
+
+    def neighbor_indices(i):
+        bx = int(xs[i]) // cell
+        by = int(ys[i]) // cell
+        neigh = []
+        for dx in (-1, 0, 1):
+            for dy in (-1, 0, 1):
+                key = (bx + dx, by + dy)
+                if key in bins:
+                    neigh.extend(bins[key])
+        return neigh
+
+    # Iterative sign alignment by local consensus
+    for _ in range(max(1, iters)):
+        for i in range(n):
+            neigh = neighbor_indices(i)
+            if len(neigh) == 0:
+                continue
+            mx = 0.0
+            my = 0.0
+            xi = xs[i]
+            yi = ys[i]
+            for j in neigh:
+                # distance filter
+                dx = xs[j] - xi
+                dy = ys[j] - yi
+                if dx * dx + dy * dy <= radius * radius:
+                    s = 1.0 if signs[j] > 0 else -1.0
+                    mx += s * nx[j]
+                    my += s * ny[j]
+            if mx == 0.0 and my == 0.0:
+                continue
+            # Flip i if it disagrees with local mean
+            dot = (nx[i] * mx + ny[i] * my)
+            if dot < 0.0:
+                signs[i] = -signs[i]
+
+    nx_aligned = nx * signs
+    ny_aligned = ny * signs
+    return nx_aligned, ny_aligned
 
 
 
@@ -411,11 +478,17 @@ def visualize_wall_angles(
     building_mask: np.ndarray,
     angles_img: np.ndarray,
     title: str = "Wall Angles Visualization",
-    sample_prob: float = 0.1,
-    save_path: str = None
+    sample_prob: float = 0.5,
+    save_path: str = None,
+    orientation_mode: str = "local",
+    local_orientation_radius: int = 8,
+    local_orientation_iters: int = 2,
 ):
     """
     Visualizes wall angles by drawing normal arrows for randomly sampled wall pixels.
+    orientation_mode:
+      - "center": force normals to point toward building interior (previous behavior)
+      - "local":  make neighboring arrows share orientation using local consensus
     """
     # Get all wall pixel coordinates
     wall_y, wall_x = np.where(building_mask > 0)
@@ -424,57 +497,51 @@ def visualize_wall_angles(
     num_pixels = len(wall_x)
     keep_mask = np.random.random(num_pixels) < sample_prob
     
-    sampled_x = wall_x[keep_mask]
-    sampled_y = wall_y[keep_mask]
-    sampled_angles = angles_img[sampled_y, sampled_x]
+    sampled_x = wall_x[keep_mask].astype(np.float32)
+    sampled_y = wall_y[keep_mask].astype(np.float32)
+    idx_x = sampled_x.astype(np.intp)
+    idx_y = sampled_y.astype(np.intp)
+    sampled_angles = angles_img[idx_y, idx_x]
     
     # Convert wall angles to normal vectors for visualization
-    # Normal is perpendicular to wall (wall_angle + 90°)
     normal_angles_rad = np.radians(sampled_angles + 90)
     nx_raw = np.cos(normal_angles_rad)
     ny_raw = np.sin(normal_angles_rad)
-    
-    # Find center of building floor (centroid of empty space)
-    empty_y, empty_x = np.where(building_mask == 0)
-    if len(empty_x) > 0:
-        center_x = empty_x.mean()
-        center_y = empty_y.mean()
-    else:
-        # Fallback if no empty space found
-        h, w = building_mask.shape
-        center_x, center_y = w/2, h/2
-    
-    # For each arrow, pick direction pointing toward building center
-    sampled_nx = np.zeros_like(nx_raw)
-    sampled_ny = np.zeros_like(ny_raw)
-    
-    for i in range(len(sampled_x)):
-        # Vector from wall pixel to building center
-        to_center_x = center_x - sampled_x[i]
-        to_center_y = center_y - sampled_y[i]
-        
-        # Test both normal directions
-        normal_1 = (nx_raw[i], ny_raw[i])
-        normal_2 = (-nx_raw[i], -ny_raw[i])
-        
-        # Pick direction with positive dot product toward building center
-        dot_1 = normal_1[0] * to_center_x + normal_1[1] * to_center_y
-        dot_2 = normal_2[0] * to_center_x + normal_2[1] * to_center_y
-        
-        if dot_1 > dot_2:
-            sampled_nx[i] = normal_1[0]
-            sampled_ny[i] = normal_1[1]
+
+    if orientation_mode == "center":
+        # Find center of building floor (centroid of empty space)
+        empty_y, empty_x = np.where(building_mask == 0)
+        if len(empty_x) > 0:
+            center_x = float(empty_x.mean())
+            center_y = float(empty_y.mean())
         else:
-            sampled_nx[i] = normal_2[0]
-            sampled_ny[i] = normal_2[1]
+            h, w = building_mask.shape
+            center_x, center_y = w / 2.0, h / 2.0
+        sampled_nx = np.zeros_like(nx_raw)
+        sampled_ny = np.zeros_like(ny_raw)
+        for i in range(len(sampled_x)):
+            to_center_x = center_x - sampled_x[i]
+            to_center_y = center_y - sampled_y[i]
+            dot_1 = nx_raw[i] * to_center_x + ny_raw[i] * to_center_y
+            if dot_1 >= 0.0:
+                sampled_nx[i] = nx_raw[i]
+                sampled_ny[i] = ny_raw[i]
+            else:
+                sampled_nx[i] = -nx_raw[i]
+                sampled_ny[i] = -ny_raw[i]
+    else:
+        # Local orientation consensus
+        sampled_nx, sampled_ny = _orient_normals_locally(
+            sampled_x, sampled_y, nx_raw, ny_raw,
+            radius=local_orientation_radius,
+            iters=local_orientation_iters,
+        )
 
     fig, ax = plt.subplots(figsize=(12, 12))
     ax.imshow(building_mask, cmap='gray', origin='upper')
 
     # Dynamically scale arrows to be proportional to the building size
     h, w = building_mask.shape
-    # Set arrow length to be ~2.5% of the image's largest dimension.
-    # A smaller scale value makes arrows longer.
     dynamic_scale = 1 / (0.025 * max(h, w))
 
     # Use quiver to draw all arrows at once
@@ -488,9 +555,6 @@ def visualize_wall_angles(
         headwidth=4,
     )
 
-    # Draw the building center point
-    ax.plot(center_x, center_y, 'ro', markersize=8, markeredgecolor='white', markeredgewidth=2, label='Building Center')
-    
     ax.set_title(title)
     ax.set_aspect('equal')
     plt.axis('off')
@@ -521,7 +585,8 @@ if __name__ == "__main__":
         building_mask, wall_angles,
         title=f"Trimmed Multi-Scale PCA Wall Angles (Building {building_id})",
         sample_prob=0.5,
-        save_path="wall_angles_multiscale.png"
+        save_path="wall_angles_multiscale.png",
+        orientation_mode="local",
     )
     
     # Print stats (fix coverage calculation - 0° is valid!)
