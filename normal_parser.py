@@ -118,6 +118,53 @@ def _pca_angle_weighted_centered(xs, ys, px, py, distance_power=1.0):
     return math.degrees(ang) % 180.0
 
 
+# NEW: anchored oriented-strip voting to avoid mixing nearby perpendicular walls
+@njit(cache=True, inline='always')
+def _angle_vote_oriented_strip(xs, ys, px, py, win, band=1.25, along_margin=2):
+    """
+    Votes for the line orientation that passes through (px,py) using a thin
+    oriented strip. This suppresses influence from walls that do not pass
+    through the source pixel (e.g., T-junctions nearby).
+
+    Returns angle in [0,180) or -1 if insufficient support.
+    """
+    n = xs.size
+    if n < 3:
+        return -1.0
+
+    best_score = -1.0
+    best_angle = -1.0
+
+    max_len = float(max(3, win - along_margin))
+
+    # Search 0..177 degrees in 3° steps (60 candidates)
+    for k in range(60):
+        ang = 3.0 * k
+        rad = ang * math.pi / 180.0
+        c = math.cos(rad)
+        s = math.sin(rad)
+
+        score = 0.0
+        count = 0
+        for i in range(n):
+            dx = xs[i] - px
+            dy = ys[i] - py
+            # perpendicular distance to line through (px,py)
+            perp = abs(-s * dx + c * dy)
+            if perp <= band:
+                # coordinate along the line direction
+                t = c * dx + s * dy
+                if abs(t) <= max_len:
+                    # weight: closer points contribute more
+                    score += 1.0 / (1.0 + 0.5 * perp + 0.25 * abs(t))
+                    count += 1
+        if count >= 3 and score > best_score:
+            best_score = score
+            best_angle = ang
+
+    return best_angle if best_score >= 0.0 else -1.0
+
+
 @njit(cache=True)
 def compute_wall_angle_pca(img, px, py, win=5):
     h, w = img.shape
@@ -133,8 +180,12 @@ def compute_wall_angle_pca(img, px, py, win=5):
     xs = xs.astype(np.float32) + x0
     ys = ys.astype(np.float32) + y0
 
-    # First line using weighted PCA centred at (px,py)
-    angle1 = _pca_angle_weighted_centered(xs, ys, px, py, 1.0)
+    # First, try anchored oriented-strip voting to avoid averaging two walls
+    angle1 = _angle_vote_oriented_strip(xs, ys, px, py, win, band=1.25, along_margin=2)
+
+    if angle1 < 0.0:
+        # Fallback to previous weighted PCA if voting failed
+        angle1 = _pca_angle_weighted_centered(xs, ys, px, py, 1.0)
 
     rad1 = math.radians(angle1)
     c1 = math.cos(rad1)
@@ -164,6 +215,12 @@ def compute_wall_angle_pca(img, px, py, win=5):
 
     if c2_idx < 3:
         # Only one wall present
+        # Refine using trimmed PCA on the inlier strip to reduce noise
+        if c1_idx >= 3:
+            xs1_f = xs1[:c1_idx]
+            ys1_f = ys1[:c1_idx]
+            refined = _pca_angle_trimmed(xs1_f, ys1_f)
+            return refined
         return angle1
 
     # Compute second line on remaining points
@@ -270,7 +327,7 @@ def compute_wall_angle_multiscale_pca(img, px, py):
     h, w = img.shape
     
     # Try multiple window sizes (small to large)
-    window_sizes = np.array([11, 12])
+    window_sizes = np.array([9, 11, 13], dtype=np.int64)
     angles = np.zeros(len(window_sizes), dtype=np.float32)
     valid_count = 0
     
@@ -344,6 +401,7 @@ def precompute_wall_angles_pca(building_mask: np.ndarray) -> np.ndarray:
                 angles_img[py, px] = angle
     
     return angles_img
+
 
 
 
