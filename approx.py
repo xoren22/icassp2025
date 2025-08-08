@@ -1,8 +1,19 @@
+import os
+# Ensure a fork-safe Numba threading backend before importing numba
+if "NUMBA_THREADING_LAYER" not in os.environ:
+    os.environ["NUMBA_THREADING_LAYER"] = "workqueue"
+# Limit thread pools from BLAS/OpenMP libraries to avoid oversubscription/crashes
+os.environ.setdefault("OMP_NUM_THREADS", "1")
+os.environ.setdefault("MKL_NUM_THREADS", "1")
+os.environ.setdefault("NUMBA_NUM_THREADS", "1")
+
 from tqdm import tqdm
 import torch, numpy as np
 from numba import njit, prange
 from helper import (RadarSample, load_samples, rmse, visualize_predictions, compare_two_matrices, compare_hit_counts)
-import os
+from concurrent.futures import ProcessPoolExecutor
+import multiprocessing as _mp
+from concurrent.futures import ThreadPoolExecutor
 
 _WARMED_UP = False
 # ---------------------------------------------------------------------#
@@ -39,9 +50,9 @@ def load_precomputed_normals_for_building(building_id: int, refl: np.ndarray, tr
 # ---------------------------------------------------------------------#
 #  GLOBALS                                                             #
 # ---------------------------------------------------------------------#
-MAX_REFL  = 10            # reflection budget for normal runs
-MAX_TRANS = 15           # transmission (wall) budget
-N_ANGLES  = 360*128      # single place to control angular resolution for combined method
+MAX_REFL  = 5            # reflection budget for normal runs
+MAX_TRANS = 10           # transmission (wall) budget
+N_ANGLES  = 360*128//8      # single place to control angular resolution for combined method
 
 # Backfill configuration
 BACKFILL_METHOD = "los"     # options: "los", "diffuse", or "fspl"
@@ -509,6 +520,21 @@ def calculate_transmission_loss_numpy(trans_mat, x_ant, y_ant, freq_MHz, n_angle
 # ---------------------------------------------------------------------#
 #  APPROX WRAPPER                                                      #
 # ---------------------------------------------------------------------#
+def _predict_worker(args):
+    """Per-process worker to approximate a single sample.
+    Sets numba threads before warmup to avoid oversubscription.
+    """
+    method, max_trans, max_refl, numba_threads, sample = args
+    try:
+        import numba as _nb
+        if numba_threads and numba_threads > 0:
+            _nb.set_num_threads(numba_threads)
+    except Exception:
+        pass
+    # Construct per-process Approx (triggers JIT warmup once per process)
+    model = Approx(method)
+    return model.approximate(sample, max_trans=max_trans, max_refl=max_refl)
+
 class Approx:
     def __init__(self, method='combined'):
         self.method = method
@@ -561,8 +587,33 @@ class Approx:
         feat = np.minimum(feat, 160.0)
         return torch.from_numpy(np.floor(feat))
 
-    def predict(self, samples, max_trans=MAX_TRANS, max_refl=MAX_REFL):
-        return [self.approximate(s, max_trans, max_refl) for s in tqdm(samples, "predicting")]
+    def predict(self, samples, max_trans=MAX_TRANS, max_refl=MAX_REFL, num_workers: int = 0, numba_threads: int = 0, backend: str = "threads"):
+        """Predict over a batch of samples.
+        - num_workers <= 1: run sequentially
+        - backend=='threads': use ThreadPool, set a low global Numba thread count to avoid oversubscription
+        - backend=='processes': use ProcessPool (spawn-safe), set per-worker Numba threads
+        """
+        if num_workers is None or num_workers <= 1:
+            return [self.approximate(s, max_trans, max_refl) for s in tqdm(samples, "predicting")]
+        max_workers = num_workers if isinstance(num_workers, int) and num_workers > 0 else max(1, (_mp.cpu_count() or 2) - 1)
+        if backend == "threads":
+            try:
+                import numba as _nb
+                if numba_threads and numba_threads > 0:
+                    _nb.set_num_threads(numba_threads)
+                else:
+                    # default: split cores across workers
+                    per = max(1, (_mp.cpu_count() or 2) // max_workers)
+                    _nb.set_num_threads(per)
+            except Exception:
+                pass
+            with ThreadPoolExecutor(max_workers=max_workers) as ex:
+                futures = [ex.submit(self.approximate, s, max_trans, max_refl) for s in samples]
+                return [f.result() for f in tqdm(futures, total=len(futures), desc="predicting")]
+        else:
+            args_iter = [(self.method, max_trans, max_refl, (numba_threads or 0), s) for s in samples]
+            with ProcessPoolExecutor(max_workers=max_workers) as ex:
+                return list(tqdm(ex.map(_predict_worker, args_iter), total=len(samples), desc="predicting"))
 
 
 # ---------------------------------------------------------------------#
@@ -579,7 +630,17 @@ if __name__ == "__main__":
     parser.add_argument("--hits", action="store_true",
                         help="generate hit-count plots (hit_counts.png)")
     parser.add_argument("--viz_k", type=int, default=12, help="number of samples to show in viz.png (top-|ΔRMSE|)")
+    parser.add_argument("--workers", type=int, default=0, help="parallel workers for batch (0/1 = off)")
+    parser.add_argument("--numba_threads", type=int, default=0, help="Numba threads (threads backend: global per process; processes backend: per worker)")
+    parser.add_argument("--backend", type=str, default="threads", choices=["threads","processes"], help="parallel backend for batch")
     args = parser.parse_args()
+
+    # Use spawn to avoid forking issues with threaded libraries (Numba/TBB)
+    try:
+        import multiprocessing as mp
+        mp.set_start_method("spawn", force=False)
+    except Exception:
+        pass
 
     N = args.N
     seed = None if args.seed is None or str(args.seed).lower() == 'none' else int(args.seed)
@@ -620,8 +681,8 @@ if __name__ == "__main__":
     comb_model = Approx("combined")
     txonly_model = Approx("transmission")
 
-    preds_comb = comb_model.predict(samples, max_refl=MAX_REFL)
-    preds_tx   = txonly_model.predict(samples, max_refl=0)
+    preds_comb = comb_model.predict(samples, max_refl=MAX_REFL, num_workers=args.workers, numba_threads=args.numba_threads, backend=args.backend)
+    preds_tx   = txonly_model.predict(samples, max_refl=0, num_workers=args.workers, numba_threads=args.numba_threads, backend=args.backend)
 
     rms_c = [rmse(p, s.output_img) for p, s in zip(preds_comb, samples)]
     rms_t = [rmse(p, s.output_img) for p, s in zip(preds_tx, samples)]
