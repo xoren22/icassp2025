@@ -61,12 +61,14 @@ class PathlossDataset(Dataset):
     def __init__(self, 
         inputs_list,  
         training=False, load_output=True, augmentations=None,
+        feature_type: str = "transmittance",
     ):
 
-        self.training = training
+        
         self.inputs_list = inputs_list
         self.load_output = load_output
         self.augmentations = augmentations
+        self.feature_type = feature_type
 
         self.target_size = IMG_TARGET_SIZE
         self.samples = self._preprocess_samples(self.inputs_list)
@@ -90,7 +92,7 @@ class PathlossDataset(Dataset):
             sample = self.augmentations(sample)
 
         output_tensor = sample.output_img if sample.output_img is not None else None
-        input_tensor = featurize_inputs(sample=sample)
+        input_tensor = featurize_inputs(sample=sample, feature_type=self.feature_type)
         mask = sample.mask
 
         return input_tensor, output_tensor, mask   

@@ -5,6 +5,13 @@ from scipy.ndimage import gaussian_filter
 
 from _types import RadarSample
 
+# Import combined approximator utilities without duplicating code
+from approx import (
+    load_precomputed_normals_for_building,
+    calculate_combined_loss_with_normals,
+    N_ANGLES,
+)
+
 
 @njit
 def _calculate_transmittance_loss_numpy(transmittance_matrix, x_ant, y_ant, n_angles, radial_step, max_walls):
@@ -88,6 +95,31 @@ def calculate_transmittance_loss(transmittance_matrix, x_ant, y_ant, n_angles=36
     return torch.from_numpy(output_np).to(device=torch.device('cpu'))
 
 
+def calculate_combined_feature(sample: RadarSample, n_angles: int = N_ANGLES) -> torch.Tensor:
+    """
+    Compute the combined pathloss approximation feature (FSPL + walls) using
+    the precomputed wall normals for the building associated with `sample`.
+    Returns a CPU float32 tensor of shape (H, W).
+    """
+    reflectance = sample.input_img[0].cpu().numpy()
+    transmittance = sample.input_img[1].cpu().numpy()
+    x_ant, y_ant, f = float(sample.x_ant), float(sample.y_ant), float(sample.freq_MHz)
+
+    # Determine building id from sample.ids (tuple like (b, ant, f, sp))
+    b_id = int(sample.ids[0]) if sample.ids is not None else 0
+    nx_img, ny_img = load_precomputed_normals_for_building(b_id, reflectance, transmittance)
+
+    feat, _ = calculate_combined_loss_with_normals(
+        reflectance.astype(np.float64),
+        transmittance.astype(np.float64),
+        nx_img, ny_img,
+        x_ant, y_ant, f,
+        n_angles=n_angles,
+    )
+    feat = np.nan_to_num(np.minimum(feat, 160.0), nan=160.0, posinf=160.0, neginf=0.0)
+    return torch.from_numpy(feat.astype(np.float32))
+
+
 def calculate_fspl(
     dist_m,               # distance in meters (torch tensor)
     freq_MHz,             # frequency in MHz
@@ -118,17 +150,42 @@ def calculate_antenna_gain(radiation_pattern, W, H, azimuth, x_ant, y_ant):
 
 
 def normalize_input(input_tensor):
-    normalized = input_tensor.clone()
-    normalized[0] = normalized[0] / 10.0 # reflecatnace is ~12
-    normalized[1] = normalized[1] / 10.0 # transmittance is ~12
-    normalized[2] = normalized[2]  / 35.0 # max fspl are in range 25~43
-    normalized[3] = torch.log10(normalized[3]) - np.log10([868, 1800, 3500]).mean()  # frequency in MHz
-    normalized[4] = normalized[4] / 100.0 # fspl+tranmittance has values < 300
-    # normalized[5] is the mask and is left as is
+    """Normalize channels to reasonable ranges; returns a new tensor."""
+    normalized = torch.empty_like(input_tensor)
+
+    # Reflectance [0,150] -> [0,1]
+    ch = input_tensor[0].clone()
+    ch.clamp_(min=0, max=150)
+    normalized[0] = ch / 150.0
+
+    # Transmittance [0,150] -> [0,1]
+    ch = input_tensor[1].clone()
+    ch.clamp_(min=0, max=150)
+    normalized[1] = ch / 150.0
+
+    # Distance [0,1000] -> [0,1]
+    ch = input_tensor[2].clone()
+    ch.clamp_(min=0, max=1000)
+    normalized[2] = ch / 1000.0
+
+    # Frequency [868,3500] -> [0,1]
+    ch = input_tensor[3].clone()
+    ch.clamp_(min=868, max=3500)
+    normalized[3] = (ch - 868.0) / (3500.0 - 868.0)
+
+    # Approx feature [0,160] -> [0,1]
+    ch = input_tensor[4].clone()
+    ch = torch.nan_to_num(ch, nan=160.0, posinf=160.0, neginf=0.0)
+    ch.clamp_(min=0, max=160)
+    normalized[4] = ch / 160.0
+
+    # Mask passthrough
+    normalized[5] = input_tensor[5]
+
     return normalized
 
 
-def featurize_inputs(sample: RadarSample) -> torch.Tensor:
+def featurize_inputs(sample: RadarSample, feature_type: str = "transmittance") -> torch.Tensor:
     reflectance = sample.input_img[0]  # First channel
     transmittance = sample.input_img[1]  # Second channel
     distance = sample.input_img[2]  # Third channel
@@ -151,22 +208,24 @@ def featurize_inputs(sample: RadarSample) -> torch.Tensor:
         antenna_gain=antenna_gain, 
     )
 
-    # Calculate transmittance loss on CPU
-    transmittance_loss = calculate_transmittance_loss(
-        transmittance, 
-        sample.x_ant, 
-        sample.y_ant
-    )
-    
-    fs_plus_transmittance_loss = free_space_pathloss + transmittance_loss
+    if feature_type == "combined":
+        approx_feature = calculate_combined_feature(sample)
+    else:
+        # Calculate transmittance loss on CPU
+        transmittance_loss = calculate_transmittance_loss(
+            transmittance, 
+            sample.x_ant, 
+            sample.y_ant
+        )
+        approx_feature = free_space_pathloss + transmittance_loss
 
-    # Build input tensor: [6, H, W] - Already in correct (C, H, W) format
+    # Build input tensor: [6, H, W]
     input_tensor = torch.zeros((6, sample.H, sample.W), dtype=torch.float32, device=torch.device('cpu'))
     input_tensor[0] = reflectance  # reflectance
     input_tensor[1] = transmittance  # transmittance
     input_tensor[2] = free_space_pathloss  # distance
     input_tensor[3] = torch.full((sample.H, sample.W), sample.freq_MHz, dtype=torch.float32, device=torch.device('cpu'))
-    input_tensor[4] = fs_plus_transmittance_loss
+    input_tensor[4] = approx_feature
 
     input_tensor = normalize_input(input_tensor)
 

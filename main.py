@@ -23,6 +23,7 @@ def main():
     parser.add_argument('--lr', type=float, default=3e-4, help='Learning rate')
     parser.add_argument('--data_dir', type=str, default='data/train/', help='Data directory')
     parser.add_argument('--model_dir', type=str, default='models', help='Directory to save models')
+    parser.add_argument('--feature', type=str, default='transmittance', choices=['transmittance','combined'], help='which approximator feature to feed the model')
     
     args = parser.parse_args()
     
@@ -78,9 +79,6 @@ def main():
                         )
                         inputs_list.append(radar_sample_inputs)
 
-
-
-
     logger = TrainingLogger()
     print(f"\nLogging results at {logger.log_dir}\n\n")
 
@@ -101,7 +99,7 @@ def main():
         ]
     )
     
-    train_dataset = PathlossDataset(inputs_list=train_files, load_output=True, training=True, augmentations=augmentations)
+    train_dataset = PathlossDataset(inputs_list=train_files, load_output=True, training=True, augmentations=augmentations, feature_type=args.feature)
     train_loader = DataLoader(train_dataset, batch_size=args.batch_size, shuffle=True, num_workers=args.num_workers)
     
     model = UNetModel().to(device)
