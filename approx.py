@@ -74,7 +74,7 @@ def _fspl(dist_m: float, freq_MHz: float, min_dist_m: float = 0.125) -> float:
     return 20.0*np.log10(d) + 20.0*np.log10(freq_MHz) - 27.55
 
 # Fast FSPL lookup table to avoid log10 in inner loops
-@njit(cache=True)
+@njit(cache=False)
 def _build_fspl_lut(max_steps: int, pixel_size: float, freq_MHz: float, min_dist_m: float = 0.125):
     lut = np.empty(max_steps + 1, np.float64)
     for k in range(max_steps + 1):
@@ -279,7 +279,7 @@ def _reflect_dir(dx, dy, nx, ny):
     mag = np.hypot(rx, ry)
     return (-dx, -dy) if mag==0 else (rx/mag, ry/mag)
 
-@njit(cache=True)
+@njit(cache=False)
 def _trace_ray_recursive(
     refl_mat, trans_mat, nx_img, ny_img,
     out_img, counts,                    # counts kept for stats
@@ -392,7 +392,7 @@ def _trace_ray_recursive(
 
 
 # Variant that uses provided normal maps (from precomputed data)
-@njit(parallel=True, fastmath=True, nogil=True, boundscheck=False, cache=True)
+@njit(parallel=True, fastmath=True, nogil=True, boundscheck=False, cache=False)
 def calculate_combined_loss_with_normals(
     reflectance_mat, transmittance_mat, nx_img, ny_img,
     x_ant, y_ant, freq_MHz,
@@ -682,7 +682,9 @@ if __name__ == "__main__":
     comb_model = Approx("combined")
     txonly_model = Approx("transmission")
 
+    print("Predicting combined")
     preds_comb = comb_model.predict(samples, max_refl=MAX_REFL, num_workers=args.workers, numba_threads=args.numba_threads, backend=args.backend)
+    print("Predicting tx-only")
     preds_tx   = txonly_model.predict(samples, max_refl=0, num_workers=args.workers, numba_threads=args.numba_threads, backend=args.backend)
 
     rms_c = [rmse(p, s.output_img) for p, s in zip(preds_comb, samples)]
