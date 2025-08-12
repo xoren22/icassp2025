@@ -633,6 +633,7 @@ if __name__ == "__main__":
     parser.add_argument("--workers", type=int, default=0, help="parallel workers for batch (0/1 = off)")
     parser.add_argument("--numba_threads", type=int, default=0, help="Numba threads (threads backend: global per process; processes backend: per worker)")
     parser.add_argument("--backend", type=str, default="threads", choices=["threads","processes"], help="parallel backend for batch")
+    parser.add_argument("--untouched", action="store_true", help="compute and visualize untouched pixel masks (slow)")
     args = parser.parse_args()
 
     # Use spawn to avoid forking issues with threaded libraries (Numba/TBB)
@@ -706,30 +707,31 @@ if __name__ == "__main__":
     diffs_rmse = _np.abs(_np.array(rms_c) - _np.array(rms_t))
     top_idx = _np.argsort(-diffs_rmse)[:n_show]
 
-    # For selected samples, compute and print untouched pixel counts using the same params
     mask_c0 = {}
     mask_t0 = {}
-    for idx in top_idx:
-        ref, trans, _in = samples[idx].input_img.cpu().numpy()
-        x, y, f = samples[idx].x_ant, samples[idx].y_ant, samples[idx].freq_MHz
-        b_id = samples[idx].ids[0] if samples[idx].ids else 0
-        nx_i, ny_i = load_precomputed_normals_for_building(b_id, ref, trans)
-        _, cnt_comb = calculate_combined_loss_with_normals(
-            ref, trans, nx_i, ny_i, x, y, f,
-            n_angles=N_ANGLES,
-            max_refl=MAX_REFL, max_trans=MAX_TRANS,
-            radial_step=1.0,
-            use_fspl_lut=True)
-        _, cnt_tx = calculate_transmission_loss_numpy(
-            trans, x, y, f, n_angles=360*128, max_walls=MAX_TRANS)
-        total = cnt_comb.shape[0] * cnt_comb.shape[1]
-        untouched_c = int((_np.sum(cnt_comb == 0)).item())
-        untouched_t = int((_np.sum(cnt_tx == 0)).item())
-        pct_c = 100.0 * untouched_c / total
-        pct_t = 100.0 * untouched_t / total
-        print(f"Untouched pixels [sample {idx}]: combined={untouched_c} ({pct_c:.2f}%), tx-only={untouched_t} ({pct_t:.2f}%)")
-        mask_c0[idx] = (cnt_comb == 0)
-        mask_t0[idx] = (cnt_tx == 0)
+    if args.untouched:
+        # For selected samples, compute and print untouched pixel counts using the same params
+        for idx in top_idx:
+            ref, trans, _in = samples[idx].input_img.cpu().numpy()
+            x, y, f = samples[idx].x_ant, samples[idx].y_ant, samples[idx].freq_MHz
+            b_id = samples[idx].ids[0] if samples[idx].ids else 0
+            nx_i, ny_i = load_precomputed_normals_for_building(b_id, ref, trans)
+            _, cnt_comb = calculate_combined_loss_with_normals(
+                ref, trans, nx_i, ny_i, x, y, f,
+                n_angles=N_ANGLES,
+                max_refl=MAX_REFL, max_trans=MAX_TRANS,
+                radial_step=1.0,
+                use_fspl_lut=True)
+            _, cnt_tx = calculate_transmission_loss_numpy(
+                trans, x, y, f, n_angles=360*128, max_walls=MAX_TRANS)
+            total = cnt_comb.shape[0] * cnt_comb.shape[1]
+            untouched_c = int((_np.sum(cnt_comb == 0)).item())
+            untouched_t = int((_np.sum(cnt_tx == 0)).item())
+            pct_c = 100.0 * untouched_c / total
+            pct_t = 100.0 * untouched_t / total
+            print(f"Untouched pixels [sample {idx}]: combined={untouched_c} ({pct_c:.2f}%), tx-only={untouched_t} ({pct_t:.2f}%)")
+            mask_c0[idx] = (cnt_comb == 0)
+            mask_t0[idx] = (cnt_tx == 0)
 
     for row, idx in enumerate(top_idx):
         mats = [samples[idx].output_img, preds_comb[idx], preds_tx[idx]]
@@ -741,17 +743,18 @@ if __name__ == "__main__":
             diffs.append(_np.abs(mats[a] - mats[b]))
             diff_titles.append(f"|{base_names[a][0]}-{base_names[b][0]}|")
 
-        # add cnt==0 masks for a quick visual check
-        masks = [mask_c0[idx].astype(_np.float32), mask_t0[idx].astype(_np.float32)]
-        mask_titles = ["C0", "T0"]
-
-        row_mats   = mats + diffs + masks
+        row_mats = mats + diffs
         row_titles = base_names.copy()
         # append RMSE for approximators in titles
         row_titles[1] = f"Combined ({rmse(mats[1], mats[0]):.2f})"
         row_titles[2] = f"Tx-Only ({rmse(mats[2], mats[0]):.2f})"
         row_titles.extend(diff_titles)
-        row_titles.extend(mask_titles)
+        if args.untouched and (idx in mask_c0) and (idx in mask_t0):
+            # add cnt==0 masks for a quick visual check
+            masks = [mask_c0[idx].astype(_np.float32), mask_t0[idx].astype(_np.float32)]
+            mask_titles = ["C0", "T0"]
+            row_mats   = row_mats + masks
+            row_titles = row_titles + mask_titles
 
         if row == 0:
             # create figure with dynamic column count after knowing sizes
