@@ -12,3 +12,7 @@ inference_outputs/
 # files
 tmp.py
 *.ipynb
+*.png
+*.csv
+parsed_buildings/
+analysis_outputs/
