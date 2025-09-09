@@ -153,6 +153,126 @@ def rasterize_thick_segment(
 
 
 # ---------------------------------------------------------------
+# Higher-level drawing helpers
+# ---------------------------------------------------------------
+
+def _draw_axis_segment_with_gaps(
+    trans: np.ndarray,
+    refl: np.ndarray,
+    nx_img: np.ndarray,
+    ny_img: np.ndarray,
+    *,
+    orient: str,
+    c: float,
+    a0: float,
+    a1: float,
+    thickness_px: float,
+    t_db: float,
+    r_db: float,
+    pixel_size_m: float,
+    walls_out: List["WallSpec"],
+    gaps: List[Tuple[float, float]] | None,
+) -> None:
+    # Normalize and split [a0,a1] by gaps
+    lo, hi = (a0, a1) if a0 <= a1 else (a1, a0)
+    segments: List[Tuple[float, float]] = []
+    if gaps:
+        # clamp gaps to [lo,hi] and sort
+        _g = []
+        for g0, g1 in gaps:
+            g_lo, g_hi = (g0, g1) if g0 <= g1 else (g1, g0)
+            g_lo = max(lo, g_lo); g_hi = min(hi, g_hi)
+            if g_hi - g_lo > 1e-6:
+                _g.append((g_lo, g_hi))
+        _g.sort()
+        cur = lo
+        for g_lo, g_hi in _g:
+            if g_lo > cur:
+                segments.append((cur, g_lo))
+            cur = max(cur, g_hi)
+        if cur < hi:
+            segments.append((cur, hi))
+    else:
+        segments.append((lo, hi))
+
+    nxw, nyw = (1.0, 0.0) if orient == 'V' else (0.0, 1.0)
+    for s0, s1 in segments:
+        if s1 - s0 <= 1e-6:
+            continue
+        if orient == 'V':
+            x0, y0, x1, y1 = c, s0, c, s1
+        else:
+            x0, y0, x1, y1 = s0, c, s1, c
+        rasterize_thick_segment(trans, nx_img, ny_img, x0, y0, x1, y1, thickness_px, t_db, nxw, nyw, op="max")
+        rasterize_thick_segment(refl, nx_img, ny_img, x0, y0, x1, y1, thickness_px, r_db, nxw, nyw, op="max")
+        walls_out.append(
+            WallSpec(
+                wall_id=len(walls_out),
+                start_m=(pixels_to_meters(x0, pixel_size_m), pixels_to_meters(y0, pixel_size_m)),
+                end_m=(pixels_to_meters(x1, pixel_size_m), pixels_to_meters(y1, pixel_size_m)),
+                start_px=(int(round(x0)), int(round(y0))),
+                end_px=(int(round(x1)), int(round(y1))),
+                thickness_m=pixels_to_meters(thickness_px, pixel_size_m),
+                thickness_px=float(thickness_px),
+                orientation_rad=(0.0 if orient == 'H' else math.pi * 0.5),
+                length_m=pixels_to_meters(math.hypot(x1 - x0, y1 - y0), pixel_size_m),
+                transmittance_db=t_db,
+                reflectance_db=r_db,
+                normal_xy=(nxw, nyw),
+            )
+        )
+
+
+def _draw_arc_wall(
+    trans: np.ndarray,
+    refl: np.ndarray,
+    nx_img: np.ndarray,
+    ny_img: np.ndarray,
+    *,
+    cx: float,
+    cy: float,
+    radius_px: float,
+    theta0: float,
+    theta1: float,
+    thickness_px: float,
+    t_db: float,
+    r_db: float,
+    pixel_size_m: float,
+    walls_out: List["WallSpec"],
+    max_seg_len_px: float = 4.0,
+) -> None:
+    # Approximate arc with polyline segments limited by max_seg_len_px
+    arc_len = abs(theta1 - theta0) * radius_px
+    n = max(8, int(math.ceil(arc_len / max_seg_len_px)))
+    prev_x = cx + radius_px * math.cos(theta0)
+    prev_y = cy + radius_px * math.sin(theta0)
+    for i in range(1, n + 1):
+        t = theta0 + (theta1 - theta0) * (i / n)
+        x = cx + radius_px * math.cos(t)
+        y = cy + radius_px * math.sin(t)
+        # Normal is radial outward
+        nxw = math.cos(t)
+        nyw = math.sin(t)
+        rasterize_thick_segment(trans, nx_img, ny_img, prev_x, prev_y, x, y, thickness_px, t_db, nxw, nyw, op="max")
+        rasterize_thick_segment(refl, nx_img, ny_img, prev_x, prev_y, x, y, thickness_px, r_db, nxw, nyw, op="max")
+        walls_out.append(
+            WallSpec(
+                wall_id=len(walls_out),
+                start_m=(pixels_to_meters(prev_x, pixel_size_m), pixels_to_meters(prev_y, pixel_size_m)),
+                end_m=(pixels_to_meters(x, pixel_size_m), pixels_to_meters(y, pixel_size_m)),
+                start_px=(int(round(prev_x)), int(round(prev_y))),
+                end_px=(int(round(x)), int(round(y))),
+                thickness_m=pixels_to_meters(thickness_px, pixel_size_m),
+                thickness_px=float(thickness_px),
+                orientation_rad=0.0,
+                length_m=pixels_to_meters(math.hypot(x - prev_x, y - prev_y), pixel_size_m),
+                transmittance_db=t_db,
+                reflectance_db=r_db,
+                normal_xy=(nxw, nyw),
+            )
+        )
+        prev_x, prev_y = x, y
+
 # Room generation
 # ---------------------------------------------------------------
 
@@ -351,9 +471,9 @@ def generate_room(
     wall_thickness_m_range: Tuple[float, float] = (0.15, 0.6),
     max_overlap_fraction: float = 0.15,
     layout: str = "bsp",
-    min_room_w_m: float = 2.0,
-    min_room_h_m: float = 2.0,
-    door_prob: float = 0.7,
+    min_room_w_m: float = 8.0,
+    min_room_h_m: float = 8.0,
+    door_prob: float = 0.3,
     door_width_m_range: Tuple[float, float] = (0.7, 1.2),
     seed: Optional[int] = None,
     save_dir: Optional[str] = None,
@@ -456,6 +576,12 @@ def generate_room(
     # Update occupancy for the boundary
     occupancy[...] = (trans > 0).astype(np.uint8)
 
+    # Common door width range in pixels for branches that need it
+    door_w_px_range = (
+        float(max(0.5, meters_to_pixels(door_width_m_range[0], pixel_size_m))),
+        float(max(0.5, meters_to_pixels(door_width_m_range[1], pixel_size_m))),
+    )
+
     if layout.lower() == "bsp":
         # Build axis-aligned internal walls using BSP with door gaps
         min_w_px = meters_to_pixels(max(0.5, min_room_w_m), pixel_size_m)
@@ -463,10 +589,6 @@ def generate_room(
         root = _Rect(half_ow + 2.0, half_ow + 2.0, w_px - 1 - half_ow - 2.0, h_px - 1 - half_ow - 2.0)
         _, splits = _bsp_partition(root, min_w_px, min_h_px, rng)
         wall_th_px = float(max(1.0, meters_to_pixels(float(rng.uniform(*wall_thickness_m_range)), pixel_size_m)))
-        door_w_px_range = (
-            float(max(0.5, meters_to_pixels(door_width_m_range[0], pixel_size_m))),
-            float(max(0.5, meters_to_pixels(door_width_m_range[1], pixel_size_m))),
-        )
         _draw_bsp_splits_as_walls(
             trans,
             refl,
@@ -482,6 +604,95 @@ def generate_room(
             walls_out=walls,
             rng=rng,
         )
+        occupancy[...] = (trans > 0).astype(np.uint8)
+    elif layout.lower() == "corridor":
+        # Main horizontal corridor spine(s) and bays filled with mini-BSP
+        corridor_w_m = max(2.0, min(6.0, 0.08 * height_m))
+        corridor_w_px = meters_to_pixels(corridor_w_m, pixel_size_m)
+        y_center = h_px * 0.5
+        # Draw central corridor boundaries as two horizontal walls with frequent doors
+        t_db = 0.5 * (transmittance_db_range[0] + transmittance_db_range[1])
+        r_db = 0.5 * (reflectance_db_range[0] + reflectance_db_range[1])
+        door_w_px_range = (
+            float(max(0.5, meters_to_pixels(door_width_m_range[0], pixel_size_m))),
+            float(max(0.5, meters_to_pixels(door_width_m_range[1], pixel_size_m))),
+        )
+        wall_th_px = float(max(1.0, meters_to_pixels(float(np.mean(wall_thickness_m_range)), pixel_size_m)))
+        gaps_top = []; gaps_bot = []
+        # Create repeated openings along the corridor
+        # Space corridor openings approximately every 15–30 meters
+        step_m = float(np.random.uniform(15.0, 30.0))
+        step = max(10.0, meters_to_pixels(step_m, pixel_size_m))
+        x = half_ow + meters_to_pixels(5.0, pixel_size_m)
+        while x + step < w_px - half_ow - 4.0:
+            w = float(np.clip(np.mean(door_w_px_range) * np.random.uniform(0.7, 1.3), 2.0, step * 0.6))
+            gaps_top.append((x, x + w))
+            gaps_bot.append((x, x + w))
+            x += step
+        _draw_axis_segment_with_gaps(trans, refl, nx_img, ny_img, orient='H', c=y_center - 0.5 * corridor_w_px,
+                                      a0=half_ow + 2.0, a1=w_px - 1 - half_ow - 2.0,
+                                      thickness_px=wall_th_px, t_db=t_db, r_db=r_db, pixel_size_m=pixel_size_m,
+                                      walls_out=walls, gaps=gaps_top)
+        _draw_axis_segment_with_gaps(trans, refl, nx_img, ny_img, orient='H', c=y_center + 0.5 * corridor_w_px,
+                                      a0=half_ow + 2.0, a1=w_px - 1 - half_ow - 2.0,
+                                      thickness_px=wall_th_px, t_db=t_db, r_db=r_db, pixel_size_m=pixel_size_m,
+                                      walls_out=walls, gaps=gaps_bot)
+
+        # Fill upper and lower bays with small BSP partitions
+        for (y0, y1) in [(half_ow + 2.0, y_center - 0.5 * corridor_w_px - 2.0), (y_center + 0.5 * corridor_w_px + 2.0, h_px - 1 - half_ow - 2.0)]:
+            if y1 - y0 < 10:
+                continue
+            bay = _Rect(half_ow + 2.0, y0, w_px - 1 - half_ow - 2.0, y1)
+            min_w_px = meters_to_pixels(max(1.5, min_room_w_m), pixel_size_m)
+            min_h_px = meters_to_pixels(max(1.5, min_room_h_m), pixel_size_m)
+            _, splits = _bsp_partition(bay, min_w_px, min_h_px, rng)
+            _draw_bsp_splits_as_walls(trans, refl, nx_img, ny_img, splits,
+                                      thickness_px=wall_th_px,
+                                      trans_db_range=transmittance_db_range,
+                                      refl_db_range=reflectance_db_range,
+                                      door_prob=door_prob * 0.5,
+                                      door_width_px_range=door_w_px_range,
+                                      pixel_size_m=pixel_size_m,
+                                      walls_out=walls,
+                                      rng=rng)
+        occupancy[...] = (trans > 0).astype(np.uint8)
+    elif layout.lower() == "courtyard":
+        # Outer ring corridor (courtyard/atrium) and inner partitions, some curved corners
+        t_db = 0.5 * (transmittance_db_range[0] + transmittance_db_range[1])
+        r_db = 0.5 * (reflectance_db_range[0] + reflectance_db_range[1])
+        wall_th_px = float(max(1.0, meters_to_pixels(float(np.mean(wall_thickness_m_range)), pixel_size_m)))
+        inset = max(10.0, min(w_px, h_px) * 0.15)
+        x0 = half_ow + inset; y0 = half_ow + inset
+        x1 = w_px - 1 - half_ow - inset; y1 = h_px - 1 - half_ow - inset
+        # Straight segments of inner ring
+        _draw_axis_segment_with_gaps(trans, refl, nx_img, ny_img, orient='H', c=y0, a0=x0, a1=x1, thickness_px=wall_th_px,
+                                      t_db=t_db, r_db=r_db, pixel_size_m=pixel_size_m, walls_out=walls, gaps=[])
+        _draw_axis_segment_with_gaps(trans, refl, nx_img, ny_img, orient='H', c=y1, a0=x0, a1=x1, thickness_px=wall_th_px,
+                                      t_db=t_db, r_db=r_db, pixel_size_m=pixel_size_m, walls_out=walls, gaps=[])
+        _draw_axis_segment_with_gaps(trans, refl, nx_img, ny_img, orient='V', c=x0, a0=y0, a1=y1, thickness_px=wall_th_px,
+                                      t_db=t_db, r_db=r_db, pixel_size_m=pixel_size_m, walls_out=walls, gaps=[])
+        _draw_axis_segment_with_gaps(trans, refl, nx_img, ny_img, orient='V', c=x1, a0=y0, a1=y1, thickness_px=wall_th_px,
+                                      t_db=t_db, r_db=r_db, pixel_size_m=pixel_size_m, walls_out=walls, gaps=[])
+        # Optional rounded entries at midpoints
+        rad = max(8.0, min(w_px, h_px) * 0.07)
+        for side in [(0.5 * (x0 + x1), y0, math.pi, 0.0), (0.5 * (x0 + x1), y1, 0.0, math.pi)]:
+            cx, cy, th0, th1 = side
+            _draw_arc_wall(trans, refl, nx_img, ny_img, cx=cx, cy=cy, radius_px=rad, theta0=th0, theta1=th1,
+                           thickness_px=wall_th_px, t_db=t_db, r_db=r_db, pixel_size_m=pixel_size_m, walls_out=walls)
+        # Fill inside with a small BSP
+        inner = _Rect(x0 + 4.0, y0 + 4.0, x1 - 4.0, y1 - 4.0)
+        min_w_px = meters_to_pixels(max(2.0, min_room_w_m), pixel_size_m)
+        min_h_px = meters_to_pixels(max(2.0, min_room_h_m), pixel_size_m)
+        _, splits = _bsp_partition(inner, min_w_px, min_h_px, rng)
+        _draw_bsp_splits_as_walls(trans, refl, nx_img, ny_img, splits,
+                                  thickness_px=wall_th_px,
+                                  trans_db_range=transmittance_db_range,
+                                  refl_db_range=reflectance_db_range,
+                                  door_prob=door_prob * 0.6,
+                                  door_width_px_range=door_w_px_range,
+                                  pixel_size_m=pixel_size_m,
+                                  walls_out=walls,
+                                  rng=rng)
         occupancy[...] = (trans > 0).astype(np.uint8)
     else:
         # Random angled walls (previous behavior)
@@ -561,18 +772,18 @@ def _parse_args():
     import argparse
 
     p = argparse.ArgumentParser("Synthetic room generator")
-    p.add_argument("--width_m", type=float, default=20.0)
-    p.add_argument("--height_m", type=float, default=20.0)
+    p.add_argument("--width_m", type=float, default=200.0)
+    p.add_argument("--height_m", type=float, default=100.0)
     p.add_argument("--pixel_size_m", type=float, default=0.25)
     p.add_argument("--density", type=float, default=2.0, help="walls per 100 m^2")
     p.add_argument("--outer_thickness_m", type=float, default=0.3)
     p.add_argument("--seed", type=int, default=None)
     p.add_argument("--save_dir", type=str, default="generated_rooms")
     p.add_argument("--basename", type=str, default="room")
-    p.add_argument("--layout", type=str, default="bsp", choices=["bsp", "random"], help="layout algorithm")
-    p.add_argument("--min_room_w_m", type=float, default=2.0)
-    p.add_argument("--min_room_h_m", type=float, default=2.0)
-    p.add_argument("--door_prob", type=float, default=0.7)
+    p.add_argument("--layout", type=str, default="bsp", choices=["bsp", "random", "corridor", "courtyard"], help="layout algorithm")
+    p.add_argument("--min_room_w_m", type=float, default=8.0)
+    p.add_argument("--min_room_h_m", type=float, default=8.0)
+    p.add_argument("--door_prob", type=float, default=0.3)
     p.add_argument("--door_width_m_min", type=float, default=0.7)
     p.add_argument("--door_width_m_max", type=float, default=1.2)
     p.add_argument("--viz", action="store_true", help="visualize a generated room instead of saving maps")
@@ -582,64 +793,76 @@ def _parse_args():
 if __name__ == "__main__":
     args = _parse_args()
     if args.viz:
-        out = generate_room(
-            width_m=args.width_m,
-            height_m=args.height_m,
-            pixel_size_m=args.pixel_size_m,
-            wall_density_per_100sqm=args.density,
-            outer_wall_thickness_m=args.outer_thickness_m,
-            layout=args.layout,
-            min_room_w_m=args.min_room_w_m,
-            min_room_h_m=args.min_room_h_m,
-            door_prob=args.door_prob,
-            door_width_m_range=(args.door_width_m_min, args.door_width_m_max),
-            seed=args.seed,
-            save_dir=None,
-        )
+        import matplotlib.pyplot as plt
+        import numpy as _np
+        from matplotlib.widgets import Button
 
+        rng = _np.random.default_rng(args.seed)
+
+        def _gen_one():
+            sd = int(rng.integers(0, 2**31 - 1))
+            return generate_room(
+                width_m=args.width_m,
+                height_m=args.height_m,
+                pixel_size_m=args.pixel_size_m,
+                wall_density_per_100sqm=args.density,
+                outer_wall_thickness_m=args.outer_thickness_m,
+                layout=args.layout,
+                min_room_w_m=args.min_room_w_m,
+                min_room_h_m=args.min_room_h_m,
+                door_prob=args.door_prob,
+                door_width_m_range=(args.door_width_m_min, args.door_width_m_max),
+                seed=sd,
+                save_dir=None,
+            )
+
+        out = _gen_one()
         trans = out["trans"]; refl = out["refl"]; nx = out["nx"]; ny = out["ny"]; meta = out["meta"]
+
         print("Room:")
         print(f"  size_m: {meta.width_m} x {meta.height_m}  grid_px: {meta.grid_w} x {meta.grid_h}  pixel_size: {meta.pixel_size_m} m")
         print(f"  seed: {meta.seed}  walls: {len(meta.walls)}  density/100m^2: {meta.wall_density_per_100sqm}")
-        show_n = min(8, len(meta.walls))
-        for ws in meta.walls[:show_n]:
-            print(
-                f"  wall#{ws.wall_id}: start_m={ws.start_m} end_m={ws.end_m} thick_m={ws.thickness_m:.2f} len_m={ws.length_m:.2f} "
-                f"trans_db={ws.transmittance_db:.1f} refl_db={ws.reflectance_db:.1f} n=({ws.normal_xy[0]:.2f},{ws.normal_xy[1]:.2f})"
-            )
-        if len(meta.walls) > show_n:
-            print(f"  ... (+{len(meta.walls)-show_n} more walls)")
-
-        import matplotlib.pyplot as plt
-        import numpy as _np
 
         fig, axes = plt.subplots(1, 3, figsize=(15, 5))
+        plt.subplots_adjust(bottom=0.15)
         ax0, ax1, ax2 = axes
 
         im0 = ax0.imshow(trans, origin='lower', cmap='inferno')
         ax0.set_title('Transmittance (dB)')
-        fig.colorbar(im0, ax=ax0, fraction=0.046)
-
-        # Overlay wall segments (pixel coordinates)
-        for ws in meta.walls:
-            x0, y0 = ws.start_px
-            x1, y1 = ws.end_px
-            lw = max(1.0, ws.thickness_px * 0.5)
-            ax0.plot([x0, x1], [y0, y1], color='cyan', linewidth=lw, alpha=0.7)
+        cb0 = fig.colorbar(im0, ax=ax0, fraction=0.046)
 
         im1 = ax1.imshow(refl, origin='lower', cmap='magma')
         ax1.set_title('Reflectance (dB)')
-        fig.colorbar(im1, ax=ax1, fraction=0.046)
+        cb1 = fig.colorbar(im1, ax=ax1, fraction=0.046)
 
-        # Normals magnitude + quiver overlay
         mag = _np.hypot(nx, ny)
         im2 = ax2.imshow(mag, origin='lower', cmap='gray', vmin=0.0, vmax=1.0)
         ax2.set_title('Normals (magnitude + quiver)')
-        fig.colorbar(im2, ax=ax2, fraction=0.046)
+        cb2 = fig.colorbar(im2, ax=ax2, fraction=0.046)
+
         h, w = nx.shape
         stride = max(1, min(h, w) // 40)
         yy, xx = _np.mgrid[0:h:stride, 0:w:stride]
-        ax2.quiver(xx, yy, nx[::stride, ::stride], ny[::stride, ::stride], color='lime', scale=25)
+        quiv = ax2.quiver(xx, yy, nx[::stride, ::stride], ny[::stride, ::stride], color='lime', scale=25)
+        quiv_ref = {'q': quiv}
+
+        wall_lines = []
+        def _draw_walls(meta_obj):
+            # remove previous
+            for ln in wall_lines:
+                try:
+                    ln.remove()
+                except Exception:
+                    pass
+            wall_lines.clear()
+            for ws in meta_obj.walls:
+                x0, y0 = ws.start_px
+                x1, y1 = ws.end_px
+                lw = max(1.0, ws.thickness_px * 0.5)
+                ln, = ax0.plot([x0, x1], [y0, y1], color='cyan', linewidth=lw, alpha=0.7)
+                wall_lines.append(ln)
+
+        _draw_walls(meta)
 
         for ax in axes:
             ax.set_xlim(0, meta.grid_w - 1)
@@ -648,11 +871,33 @@ if __name__ == "__main__":
             ax.set_xlabel('x (px)')
             ax.set_ylabel('y (px)')
 
-        plt.tight_layout()
-        os.makedirs(args.save_dir, exist_ok=True)
-        viz_path = os.path.join(args.save_dir, f"{args.basename}_viz.png")
-        plt.savefig(viz_path, dpi=150)
-        print(f"Saved visualization: {viz_path}")
+        ax_button = plt.axes([0.4, 0.04, 0.2, 0.06])
+        btn = Button(ax_button, 'Sample')
+
+        def on_click(event):
+            out2 = _gen_one()
+            t2 = out2["trans"]; r2 = out2["refl"]; nx2 = out2["nx"]; ny2 = out2["ny"]; meta2 = out2["meta"]
+            im0.set_data(t2)
+            im1.set_data(r2)
+            im2.set_data(_np.hypot(nx2, ny2))
+            # update quiver
+            try:
+                quiv_ref['q'].remove()
+            except Exception:
+                pass
+            h2, w2 = nx2.shape
+            s2 = max(1, min(h2, w2) // 40)
+            yy2, xx2 = _np.mgrid[0:h2:s2, 0:w2:s2]
+            quiv_ref['q'] = ax2.quiver(xx2, yy2, nx2[::s2, ::s2], ny2[::s2, ::s2], color='lime', scale=25)
+            _draw_walls(meta2)
+            for ax in axes:
+                ax.set_xlim(0, meta2.grid_w - 1)
+                ax.set_ylim(0, meta2.grid_h - 1)
+            fig.canvas.draw_idle()
+            print(f"Sampled: seed={meta2.seed} rooms≈{len(meta2.walls)} walls")
+
+        btn.on_clicked(on_click)
+
         try:
             plt.show()
         except Exception:
