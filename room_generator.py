@@ -194,6 +194,150 @@ def _random_segment_within_room(
     return x0, y0, x1, y1, angle
 
 
+# ------------------ BSP partitioning (axis-aligned layout) ------------------
+
+@dataclass
+class _Rect:
+    x0: float
+    y0: float
+    x1: float
+    y1: float
+
+    @property
+    def w(self) -> float:
+        return self.x1 - self.x0
+
+    @property
+    def h(self) -> float:
+        return self.y1 - self.y0
+
+
+def _bsp_partition(
+    root: _Rect,
+    min_w: float,
+    min_h: float,
+    rng: np.random.Generator,
+) -> Tuple[List[_Rect], List[Tuple[str, float, float, float]]]:
+    """
+    Partition root into axis-aligned sub-rectangles using BSP.
+    Returns (leaf_rects, splits) where each split is:
+      - ('V', x, y0, y1) for a vertical wall at x spanning y0..y1
+      - ('H', y, x0, x1) for a horizontal wall at y spanning x0..x1
+    All coordinates are in pixels (float).
+    """
+    leaves: List[_Rect] = []
+    splits: List[Tuple[str, float, float, float]] = []
+
+    stack: List[_Rect] = [root]
+    while stack:
+        r = stack.pop()
+        can_split_v = r.w >= 2 * min_w
+        can_split_h = r.h >= 2 * min_h
+        if not can_split_v and not can_split_h:
+            leaves.append(r)
+            continue
+        # Choose orientation
+        if can_split_v and (not can_split_h or r.w > r.h or rng.random() < 0.5):
+            x = float(rng.uniform(r.x0 + min_w, r.x1 - min_w))
+            splits.append(('V', x, r.y0, r.y1))
+            left = _Rect(r.x0, r.y0, x, r.y1)
+            right = _Rect(x, r.y0, r.x1, r.y1)
+            # Recurse
+            stack.append(left)
+            stack.append(right)
+        else:
+            y = float(rng.uniform(r.y0 + min_h, r.y1 - min_h))
+            splits.append(('H', y, r.x0, r.x1))
+            bottom = _Rect(r.x0, r.y0, r.x1, y)
+            top = _Rect(r.x0, y, r.x1, r.y1)
+            stack.append(bottom)
+            stack.append(top)
+
+    return leaves, splits
+
+
+def _draw_bsp_splits_as_walls(
+    trans: np.ndarray,
+    refl: np.ndarray,
+    nx_img: np.ndarray,
+    ny_img: np.ndarray,
+    splits: List[Tuple[str, float, float, float]],
+    *,
+    thickness_px: float,
+    trans_db_range: Tuple[float, float],
+    refl_db_range: Tuple[float, float],
+    door_prob: float,
+    door_width_px_range: Tuple[float, float],
+    pixel_size_m: float,
+    walls_out: List[WallSpec],
+    rng: np.random.Generator,
+) -> None:
+    """
+    Convert partition splits into drawable wall segments with optional door gaps.
+    For each split, we sample a dB pair and optionally carve a gap of given width.
+    """
+    for split in splits:
+        orient, c, a0, a1 = split
+        # Sample properties per wall
+        t_db = float(rng.uniform(*trans_db_range))
+        r_db = float(rng.uniform(*refl_db_range))
+        half_th = 0.5 * max(1.0, thickness_px)
+
+        length = abs(a1 - a0)
+        has_door = (rng.random() < max(0.0, min(1.0, door_prob))) and (length > 4 * half_th)
+        door_lo = door_hi = None
+        if has_door:
+            w_px = float(rng.uniform(*door_width_px_range))
+            w_px = max(2.0, min(w_px, length - 2 * half_th))
+            center = float(rng.uniform(a0 + half_th + 0.5 * w_px, a1 - half_th - 0.5 * w_px))
+            door_lo = center - 0.5 * w_px
+            door_hi = center + 0.5 * w_px
+
+        # Build up to two segments excluding the door gap
+        segments: List[Tuple[float, float, float, float, float, float]] = []  # x0,y0,x1,y1,nx,ny
+        if orient == 'V':
+            # vertical line x=c, spanning y in [a0,a1]
+            nx, ny = 1.0, 0.0
+            if has_door:
+                if door_lo > a0:
+                    segments.append((c, a0, c, door_lo, nx, ny))
+                if door_hi < a1:
+                    segments.append((c, door_hi, c, a1, nx, ny))
+            else:
+                segments.append((c, a0, c, a1, nx, ny))
+        else:
+            # horizontal line y=c, spanning x in [a0,a1]
+            nx, ny = 0.0, 1.0
+            if has_door:
+                if door_lo > a0:
+                    segments.append((a0, c, door_lo, c, nx, ny))
+                if door_hi < a1:
+                    segments.append((door_hi, c, a1, c, nx, ny))
+            else:
+                segments.append((a0, c, a1, c, nx, ny))
+
+        for (x0, y0, x1, y1, nxw, nyw) in segments:
+            rasterize_thick_segment(trans, nx_img, ny_img, x0, y0, x1, y1, thickness_px, t_db, nxw, nyw, op="max")
+            rasterize_thick_segment(refl, nx_img, ny_img, x0, y0, x1, y1, thickness_px, r_db, nxw, nyw, op="max")
+            # Record metadata
+            walls_out.append(
+                WallSpec(
+                    wall_id=len(walls_out),
+                    start_m=(pixels_to_meters(x0, pixel_size_m), pixels_to_meters(y0, pixel_size_m)),
+                    end_m=(pixels_to_meters(x1, pixel_size_m), pixels_to_meters(y1, pixel_size_m)),
+                    start_px=(int(round(x0)), int(round(y0))),
+                    end_px=(int(round(x1)), int(round(y1))),
+                    thickness_m=pixels_to_meters(thickness_px, pixel_size_m),
+                    thickness_px=float(thickness_px),
+                    orientation_rad=(0.0 if orient == 'H' else math.pi * 0.5),
+                    length_m=pixels_to_meters(math.hypot(x1 - x0, y1 - y0), pixel_size_m),
+                    transmittance_db=t_db,
+                    reflectance_db=r_db,
+                    normal_xy=(nxw, nyw),
+                )
+            )
+
+
 def generate_room(
     *,
     width_m: float,
@@ -206,6 +350,11 @@ def generate_room(
     wall_length_m_range: Tuple[float, float] = (2.0, 10.0),
     wall_thickness_m_range: Tuple[float, float] = (0.15, 0.6),
     max_overlap_fraction: float = 0.15,
+    layout: str = "bsp",
+    min_room_w_m: float = 2.0,
+    min_room_h_m: float = 2.0,
+    door_prob: float = 0.7,
+    door_width_m_range: Tuple[float, float] = (0.7, 1.2),
     seed: Optional[int] = None,
     save_dir: Optional[str] = None,
     basename: str = "room",
@@ -307,56 +456,76 @@ def generate_room(
     # Update occupancy for the boundary
     occupancy[...] = (trans > 0).astype(np.uint8)
 
-    # Sample number of internal walls
-    area_m2 = width_m * height_m
-    n_internal = _sample_num_walls(area_m2, wall_density_per_100sqm, rng)
-
-    # Place internal walls
-    for _ in range(n_internal):
-        # Sample attributes
-        length_m = float(rng.uniform(*wall_length_m_range))
-        thickness_m = float(rng.uniform(*wall_thickness_m_range))
-        trans_db = float(rng.uniform(*transmittance_db_range))
-        refl_db = float(rng.uniform(*reflectance_db_range))
-
-        length_px = meters_to_pixels(length_m, pixel_size_m)
-        thickness_px = max(1.0, meters_to_pixels(thickness_m, pixel_size_m))
-        margin_px = max(2.0, thickness_px)
-
-        x0, y0, x1, y1, ang = _random_segment_within_room(w_px, h_px, length_px, rng, margin_px=margin_px)
-        # Normal: choose n = (-sin, cos) for segment direction
-        nxw = -math.sin(ang)
-        nyw = math.cos(ang)
-
-        # Estimate overlap using a temporary mask
-        mask_new = np.zeros_like(occupancy)
-        rasterize_thick_segment(mask_new, mask_new, mask_new, x0, y0, x1, y1, thickness_px, 1.0, 0.0, 0.0, op="max")
-        overlap = _estimate_overlap_fraction(mask_new)
-        if overlap > max_overlap_fraction:
-            # Skip highly overlapping wall
-            continue
-
-        # Commit rasterization into maps
-        rasterize_thick_segment(trans, nx_img, ny_img, x0, y0, x1, y1, thickness_px, trans_db, nxw, nyw, op="max")
-        rasterize_thick_segment(refl, nx_img, ny_img, x0, y0, x1, y1, thickness_px, refl_db, nxw, nyw, op="max")
-        occupancy |= (mask_new > 0).astype(np.uint8)
-
-        walls.append(
-            WallSpec(
-                wall_id=len(walls),
-                start_m=(pixels_to_meters(x0, pixel_size_m), pixels_to_meters(y0, pixel_size_m)),
-                end_m=(pixels_to_meters(x1, pixel_size_m), pixels_to_meters(y1, pixel_size_m)),
-                start_px=(int(round(x0)), int(round(y0))),
-                end_px=(int(round(x1)), int(round(y1))),
-                thickness_m=thickness_m,
-                thickness_px=thickness_px,
-                orientation_rad=ang,
-                length_m=length_m,
-                transmittance_db=trans_db,
-                reflectance_db=refl_db,
-                normal_xy=(nxw, nyw),
-            )
+    if layout.lower() == "bsp":
+        # Build axis-aligned internal walls using BSP with door gaps
+        min_w_px = meters_to_pixels(max(0.5, min_room_w_m), pixel_size_m)
+        min_h_px = meters_to_pixels(max(0.5, min_room_h_m), pixel_size_m)
+        root = _Rect(half_ow + 2.0, half_ow + 2.0, w_px - 1 - half_ow - 2.0, h_px - 1 - half_ow - 2.0)
+        _, splits = _bsp_partition(root, min_w_px, min_h_px, rng)
+        wall_th_px = float(max(1.0, meters_to_pixels(float(rng.uniform(*wall_thickness_m_range)), pixel_size_m)))
+        door_w_px_range = (
+            float(max(0.5, meters_to_pixels(door_width_m_range[0], pixel_size_m))),
+            float(max(0.5, meters_to_pixels(door_width_m_range[1], pixel_size_m))),
         )
+        _draw_bsp_splits_as_walls(
+            trans,
+            refl,
+            nx_img,
+            ny_img,
+            splits,
+            thickness_px=wall_th_px,
+            trans_db_range=transmittance_db_range,
+            refl_db_range=reflectance_db_range,
+            door_prob=door_prob,
+            door_width_px_range=door_w_px_range,
+            pixel_size_m=pixel_size_m,
+            walls_out=walls,
+            rng=rng,
+        )
+        occupancy[...] = (trans > 0).astype(np.uint8)
+    else:
+        # Random angled walls (previous behavior)
+        area_m2 = width_m * height_m
+        n_internal = _sample_num_walls(area_m2, wall_density_per_100sqm, rng)
+
+        for _ in range(n_internal):
+            length_m = float(rng.uniform(*wall_length_m_range))
+            thickness_m = float(rng.uniform(*wall_thickness_m_range))
+            trans_db = float(rng.uniform(*transmittance_db_range))
+            refl_db = float(rng.uniform(*reflectance_db_range))
+
+            length_px = meters_to_pixels(length_m, pixel_size_m)
+            thickness_px = max(1.0, meters_to_pixels(thickness_m, pixel_size_m))
+            margin_px = max(2.0, thickness_px)
+
+            x0, y0, x1, y1, ang = _random_segment_within_room(w_px, h_px, length_px, rng, margin_px=margin_px)
+            nxw = -math.sin(ang)
+            nyw = math.cos(ang)
+
+            mask_new = np.zeros_like(occupancy)
+            rasterize_thick_segment(mask_new, mask_new, mask_new, x0, y0, x1, y1, thickness_px, 1.0, 0.0, 0.0, op="max")
+            overlap = _estimate_overlap_fraction(mask_new)
+            if overlap > max_overlap_fraction:
+                continue
+            rasterize_thick_segment(trans, nx_img, ny_img, x0, y0, x1, y1, thickness_px, trans_db, nxw, nyw, op="max")
+            rasterize_thick_segment(refl, nx_img, ny_img, x0, y0, x1, y1, thickness_px, refl_db, nxw, nyw, op="max")
+            occupancy |= (mask_new > 0).astype(np.uint8)
+            walls.append(
+                WallSpec(
+                    wall_id=len(walls),
+                    start_m=(pixels_to_meters(x0, pixel_size_m), pixels_to_meters(y0, pixel_size_m)),
+                    end_m=(pixels_to_meters(x1, pixel_size_m), pixels_to_meters(y1, pixel_size_m)),
+                    start_px=(int(round(x0)), int(round(y0))),
+                    end_px=(int(round(x1)), int(round(y1))),
+                    thickness_m=thickness_m,
+                    thickness_px=thickness_px,
+                    orientation_rad=ang,
+                    length_m=length_m,
+                    transmittance_db=trans_db,
+                    reflectance_db=refl_db,
+                    normal_xy=(nxw, nyw),
+                )
+            )
 
     meta = RoomMeta(
         width_m=width_m,
@@ -400,6 +569,12 @@ def _parse_args():
     p.add_argument("--seed", type=int, default=None)
     p.add_argument("--save_dir", type=str, default="generated_rooms")
     p.add_argument("--basename", type=str, default="room")
+    p.add_argument("--layout", type=str, default="bsp", choices=["bsp", "random"], help="layout algorithm")
+    p.add_argument("--min_room_w_m", type=float, default=2.0)
+    p.add_argument("--min_room_h_m", type=float, default=2.0)
+    p.add_argument("--door_prob", type=float, default=0.7)
+    p.add_argument("--door_width_m_min", type=float, default=0.7)
+    p.add_argument("--door_width_m_max", type=float, default=1.2)
     p.add_argument("--viz", action="store_true", help="visualize a generated room instead of saving maps")
     return p.parse_args()
 
@@ -413,6 +588,11 @@ if __name__ == "__main__":
             pixel_size_m=args.pixel_size_m,
             wall_density_per_100sqm=args.density,
             outer_wall_thickness_m=args.outer_thickness_m,
+            layout=args.layout,
+            min_room_w_m=args.min_room_w_m,
+            min_room_h_m=args.min_room_h_m,
+            door_prob=args.door_prob,
+            door_width_m_range=(args.door_width_m_min, args.door_width_m_max),
             seed=args.seed,
             save_dir=None,
         )
@@ -484,6 +664,11 @@ if __name__ == "__main__":
         pixel_size_m=args.pixel_size_m,
         wall_density_per_100sqm=args.density,
         outer_wall_thickness_m=args.outer_thickness_m,
+        layout=args.layout,
+        min_room_w_m=args.min_room_w_m,
+        min_room_h_m=args.min_room_h_m,
+        door_prob=args.door_prob,
+        door_width_m_range=(args.door_width_m_min, args.door_width_m_max),
         seed=args.seed,
         save_dir=args.save_dir,
         basename=args.basename,
