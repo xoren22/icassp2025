@@ -1,927 +1,431 @@
-import json
-import math
-import os
-from dataclasses import dataclass, asdict
-from typing import List, Tuple, Optional, Dict, Any
+# Floor plan generator with one-click randomization.
+# - Produces a binary wall mask (1=wall, 0=no wall)
+# - Includes straight and curved walls, realistic thickness variation, and corridors
+# - A "New floor" button regenerates a different plan on each click
+#
+# Dependencies: numpy, matplotlib, ipywidgets (all standard in Jupyter). No internet access required.
 
 import numpy as np
+import matplotlib.pyplot as plt
 
+# Try to import ipywidgets; fall back to a Matplotlib button if unavailable.
+try:
+    import ipywidgets as widgets
+    from IPython.display import display, clear_output
+    _HAS_WIDGETS = True
+except Exception:
+    from matplotlib.widgets import Button
+    _HAS_WIDGETS = False
 
-# ---------------------------------------------------------------
-# Data structures
-# ---------------------------------------------------------------
+# Detect if we're running inside a Jupyter environment (with an active kernel).
+def _in_jupyter():
+    try:
+        from IPython import get_ipython
+        ip = get_ipython()
+        return ip is not None and hasattr(ip, "kernel")
+    except Exception:
+        return False
 
-@dataclass
-class WallSpec:
-    wall_id: int
-    start_m: Tuple[float, float]
-    end_m: Tuple[float, float]
-    start_px: Tuple[int, int]
-    end_px: Tuple[int, int]
-    thickness_m: float
-    thickness_px: float
-    orientation_rad: float
-    length_m: float
-    transmittance_db: float
-    reflectance_db: float
-    normal_xy: Tuple[float, float]
+# ---------- Geometry helpers (raster) ----------
 
+def draw_thick_segment(mask, p0, p1, width_px):
+    """Draw a thick line segment (inclusive) into a binary mask."""
+    x0, y0 = float(p0[0]), float(p0[1])
+    x1, y1 = float(p1[0]), float(p1[1])
+    w = max(1.0, float(width_px))
+    r = w / 2.0
 
-@dataclass
-class RoomMeta:
-    width_m: float
-    height_m: float
-    pixel_size_m: float
-    grid_h: int
-    grid_w: int
-    wall_density_per_100sqm: float
-    outer_wall_thickness_m: float
-    seed: Optional[int]
-    walls: List[WallSpec]
+    xmin = int(np.floor(min(x0, x1) - r - 2))
+    xmax = int(np.ceil (max(x0, x1) + r + 2))
+    ymin = int(np.floor(min(y0, y1) - r - 2))
+    ymax = int(np.ceil (max(y0, y1) + r + 2))
 
-    def to_json(self) -> str:
-        d = asdict(self)
-        return json.dumps(d, indent=2)
-
-
-# ---------------------------------------------------------------
-# Geometry helpers
-# ---------------------------------------------------------------
-
-def meters_to_pixels(x_m: float, pixel_size: float) -> float:
-    return x_m / pixel_size
-
-
-def pixels_to_meters(x_px: float, pixel_size: float) -> float:
-    return x_px * pixel_size
-
-
-def segment_bounding_box(x0: float, y0: float, x1: float, y1: float, half_width: float) -> Tuple[int, int, int, int]:
-    xmin = math.floor(min(x0, x1) - half_width - 1)
-    xmax = math.ceil(max(x0, x1) + half_width + 1)
-    ymin = math.floor(min(y0, y1) - half_width - 1)
-    ymax = math.ceil(max(y0, y1) + half_width + 1)
-    return xmin, ymin, xmax, ymax
-
-
-def rasterize_thick_segment(
-    canvas: np.ndarray,
-    nx_canvas: np.ndarray,
-    ny_canvas: np.ndarray,
-    x0: float,
-    y0: float,
-    x1: float,
-    y1: float,
-    thickness_px: float,
-    value: float,
-    nx: float,
-    ny: float,
-    *,
-    op: str = "max",
-) -> None:
-    """
-    Rasterize a thick line segment onto canvas using a distance-to-segment test.
-    - canvas: 2D array to write dB values into
-    - nx_canvas/ny_canvas: 2D arrays to store normals per pixel
-    - (x0,y0)-(x1,y1): segment endpoints in pixel coordinates (float)
-    - thickness_px: total thickness in pixels
-    - value: dB value to write into canvas
-    - nx, ny: unit normal components to assign where drawn
-    - op: 'max' (recommended) or 'add' for combining with existing values
-    """
-    h, w = canvas.shape
-    half_w = 0.5 * max(1.0, float(thickness_px))
-
-    xmin, ymin, xmax, ymax = segment_bounding_box(x0, y0, x1, y1, half_w)
-    xmin = max(0, xmin)
-    ymin = max(0, ymin)
-    xmax = min(w - 1, xmax)
-    ymax = min(h - 1, ymax)
-
-    seg_dx = x1 - x0
-    seg_dy = y1 - y0
-    seg_len2 = seg_dx * seg_dx + seg_dy * seg_dy
-    if seg_len2 <= 1e-9:
-        # Degenerate => draw a disk
-        rr = int(math.ceil(half_w))
-        cx = int(round(x0))
-        cy = int(round(y0))
-        for py in range(max(0, cy - rr), min(h, cy + rr + 1)):
-            for px in range(max(0, cx - rr), min(w, cx + rr + 1)):
-                if (px - cx) * (px - cx) + (py - cy) * (py - cy) <= rr * rr:
-                    if op == "max":
-                        if value > canvas[py, px]:
-                            canvas[py, px] = value
-                            nx_canvas[py, px] = nx
-                            ny_canvas[py, px] = ny
-                    elif op == "add":
-                        canvas[py, px] += value
-                        nx_canvas[py, px] = nx
-                        ny_canvas[py, px] = ny
+    # clamp to mask bounds
+    H, W = mask.shape
+    xmin = max(0, xmin); ymin = max(0, ymin)
+    xmax = min(W - 1, xmax); ymax = min(H - 1, ymax)
+    if xmin > xmax or ymin > ymax:
         return
 
-    inv_len2 = 1.0 / seg_len2
-    half_w2 = half_w * half_w
+    xs = np.arange(xmin, xmax + 1)
+    ys = np.arange(ymin, ymax + 1)
+    gx, gy = np.meshgrid(xs, ys)
 
-    for py in range(ymin, ymax + 1):
-        for px in range(xmin, xmax + 1):
-            # Point projection parameter t in [0,1]
-            vx = px - x0
-            vy = py - y0
-            t = (vx * seg_dx + vy * seg_dy) * inv_len2
-            if t < 0.0:
-                dxp = px - x0
-                dyp = py - y0
-            elif t > 1.0:
-                dxp = px - x1
-                dyp = py - y1
-            else:
-                projx = x0 + t * seg_dx
-                projy = y0 + t * seg_dy
-                dxp = px - projx
-                dyp = py - projy
-            if dxp * dxp + dyp * dyp <= half_w2:
-                if op == "max":
-                    if value > canvas[py, px]:
-                        canvas[py, px] = value
-                        nx_canvas[py, px] = nx
-                        ny_canvas[py, px] = ny
-                elif op == "add":
-                    canvas[py, px] += value
-                    nx_canvas[py, px] = nx
-                    ny_canvas[py, px] = ny
+    dx = x1 - x0
+    dy = y1 - y0
+    L2 = dx * dx + dy * dy
+    if L2 == 0:
+        # draw a disk
+        d2 = (gx - x0) ** 2 + (gy - y0) ** 2
+        mask[ymin:ymax + 1, xmin:xmax + 1] |= (d2 <= r * r)
+        return
 
+    t = ((gx - x0) * dx + (gy - y0) * dy) / L2
+    t = np.clip(t, 0.0, 1.0)
+    cx = x0 + t * dx
+    cy = y0 + t * dy
+    d2 = (gx - cx) ** 2 + (gy - cy) ** 2
+    mask[ymin:ymax + 1, xmin:xmax + 1] |= (d2 <= r * r)
 
-# ---------------------------------------------------------------
-# Higher-level drawing helpers
-# ---------------------------------------------------------------
-
-def _draw_axis_segment_with_gaps(
-    trans: np.ndarray,
-    refl: np.ndarray,
-    nx_img: np.ndarray,
-    ny_img: np.ndarray,
-    *,
-    orient: str,
-    c: float,
-    a0: float,
-    a1: float,
-    thickness_px: float,
-    t_db: float,
-    r_db: float,
-    pixel_size_m: float,
-    walls_out: List["WallSpec"],
-    gaps: List[Tuple[float, float]] | None,
-) -> None:
-    # Normalize and split [a0,a1] by gaps
-    lo, hi = (a0, a1) if a0 <= a1 else (a1, a0)
-    segments: List[Tuple[float, float]] = []
-    if gaps:
-        # clamp gaps to [lo,hi] and sort
-        _g = []
-        for g0, g1 in gaps:
-            g_lo, g_hi = (g0, g1) if g0 <= g1 else (g1, g0)
-            g_lo = max(lo, g_lo); g_hi = min(hi, g_hi)
-            if g_hi - g_lo > 1e-6:
-                _g.append((g_lo, g_hi))
-        _g.sort()
-        cur = lo
-        for g_lo, g_hi in _g:
-            if g_lo > cur:
-                segments.append((cur, g_lo))
-            cur = max(cur, g_hi)
-        if cur < hi:
-            segments.append((cur, hi))
+def draw_polyline(mask, points, width_px, closed=False):
+    if closed and len(points) >= 2:
+        pts = points + [points[0]]
     else:
-        segments.append((lo, hi))
+        pts = points
+    for i in range(len(pts) - 1):
+        draw_thick_segment(mask, pts[i], pts[i + 1], width_px)
 
-    nxw, nyw = (1.0, 0.0) if orient == 'V' else (0.0, 1.0)
-    for s0, s1 in segments:
-        if s1 - s0 <= 1e-6:
-            continue
-        if orient == 'V':
-            x0, y0, x1, y1 = c, s0, c, s1
-        else:
-            x0, y0, x1, y1 = s0, c, s1, c
-        rasterize_thick_segment(trans, nx_img, ny_img, x0, y0, x1, y1, thickness_px, t_db, nxw, nyw, op="max")
-        rasterize_thick_segment(refl, nx_img, ny_img, x0, y0, x1, y1, thickness_px, r_db, nxw, nyw, op="max")
-        walls_out.append(
-            WallSpec(
-                wall_id=len(walls_out),
-                start_m=(pixels_to_meters(x0, pixel_size_m), pixels_to_meters(y0, pixel_size_m)),
-                end_m=(pixels_to_meters(x1, pixel_size_m), pixels_to_meters(y1, pixel_size_m)),
-                start_px=(int(round(x0)), int(round(y0))),
-                end_px=(int(round(x1)), int(round(y1))),
-                thickness_m=pixels_to_meters(thickness_px, pixel_size_m),
-                thickness_px=float(thickness_px),
-                orientation_rad=(0.0 if orient == 'H' else math.pi * 0.5),
-                length_m=pixels_to_meters(math.hypot(x1 - x0, y1 - y0), pixel_size_m),
-                transmittance_db=t_db,
-                reflectance_db=r_db,
-                normal_xy=(nxw, nyw),
-            )
-        )
-
-
-def _draw_arc_wall(
-    trans: np.ndarray,
-    refl: np.ndarray,
-    nx_img: np.ndarray,
-    ny_img: np.ndarray,
-    *,
-    cx: float,
-    cy: float,
-    radius_px: float,
-    theta0: float,
-    theta1: float,
-    thickness_px: float,
-    t_db: float,
-    r_db: float,
-    pixel_size_m: float,
-    walls_out: List["WallSpec"],
-    max_seg_len_px: float = 4.0,
-) -> None:
-    # Approximate arc with polyline segments limited by max_seg_len_px
-    arc_len = abs(theta1 - theta0) * radius_px
-    n = max(8, int(math.ceil(arc_len / max_seg_len_px)))
-    prev_x = cx + radius_px * math.cos(theta0)
-    prev_y = cy + radius_px * math.sin(theta0)
-    for i in range(1, n + 1):
-        t = theta0 + (theta1 - theta0) * (i / n)
-        x = cx + radius_px * math.cos(t)
-        y = cy + radius_px * math.sin(t)
-        # Normal is radial outward
-        nxw = math.cos(t)
-        nyw = math.sin(t)
-        rasterize_thick_segment(trans, nx_img, ny_img, prev_x, prev_y, x, y, thickness_px, t_db, nxw, nyw, op="max")
-        rasterize_thick_segment(refl, nx_img, ny_img, prev_x, prev_y, x, y, thickness_px, r_db, nxw, nyw, op="max")
-        walls_out.append(
-            WallSpec(
-                wall_id=len(walls_out),
-                start_m=(pixels_to_meters(prev_x, pixel_size_m), pixels_to_meters(prev_y, pixel_size_m)),
-                end_m=(pixels_to_meters(x, pixel_size_m), pixels_to_meters(y, pixel_size_m)),
-                start_px=(int(round(prev_x)), int(round(prev_y))),
-                end_px=(int(round(x)), int(round(y))),
-                thickness_m=pixels_to_meters(thickness_px, pixel_size_m),
-                thickness_px=float(thickness_px),
-                orientation_rad=0.0,
-                length_m=pixels_to_meters(math.hypot(x - prev_x, y - prev_y), pixel_size_m),
-                transmittance_db=t_db,
-                reflectance_db=r_db,
-                normal_xy=(nxw, nyw),
-            )
-        )
-        prev_x, prev_y = x, y
-
-# Room generation
-# ---------------------------------------------------------------
-
-def _rng(seed: Optional[int]) -> np.random.Generator:
-    return np.random.default_rng(seed if seed is not None else None)
-
-
-def _sample_num_walls(area_m2: float, density_per_100sqm: float, rng: np.random.Generator) -> int:
-    lam = max(0.0, density_per_100sqm) * (area_m2 / 100.0)
-    return int(rng.poisson(lam=lam))
-
-
-def _clip_to_room(px: float, py: float, w: int, h: int, margin_px: float) -> Tuple[float, float]:
-    return (
-        float(np.clip(px, margin_px, w - 1 - margin_px)),
-        float(np.clip(py, margin_px, h - 1 - margin_px)),
-    )
-
-
-def _random_segment_within_room(
-    w: int,
-    h: int,
-    length_px: float,
-    rng: np.random.Generator,
-    margin_px: float,
-) -> Tuple[float, float, float, float, float]:
-    angle = rng.uniform(0.0, 2.0 * math.pi)
-    dx = math.cos(angle)
-    dy = math.sin(angle)
-    cx = rng.uniform(margin_px, w - 1 - margin_px)
-    cy = rng.uniform(margin_px, h - 1 - margin_px)
-    half_len = 0.5 * length_px
-    x0 = cx - dx * half_len
-    y0 = cy - dy * half_len
-    x1 = cx + dx * half_len
-    y1 = cy + dy * half_len
-    x0, y0 = _clip_to_room(x0, y0, w, h, margin_px)
-    x1, y1 = _clip_to_room(x1, y1, w, h, margin_px)
-    return x0, y0, x1, y1, angle
-
-
-# ------------------ BSP partitioning (axis-aligned layout) ------------------
-
-@dataclass
-class _Rect:
-    x0: float
-    y0: float
-    x1: float
-    y1: float
-
-    @property
-    def w(self) -> float:
-        return self.x1 - self.x0
-
-    @property
-    def h(self) -> float:
-        return self.y1 - self.y0
-
-
-def _bsp_partition(
-    root: _Rect,
-    min_w: float,
-    min_h: float,
-    rng: np.random.Generator,
-) -> Tuple[List[_Rect], List[Tuple[str, float, float, float]]]:
-    """
-    Partition root into axis-aligned sub-rectangles using BSP.
-    Returns (leaf_rects, splits) where each split is:
-      - ('V', x, y0, y1) for a vertical wall at x spanning y0..y1
-      - ('H', y, x0, x1) for a horizontal wall at y spanning x0..x1
-    All coordinates are in pixels (float).
-    """
-    leaves: List[_Rect] = []
-    splits: List[Tuple[str, float, float, float]] = []
-
-    stack: List[_Rect] = [root]
-    while stack:
-        r = stack.pop()
-        can_split_v = r.w >= 2 * min_w
-        can_split_h = r.h >= 2 * min_h
-        if not can_split_v and not can_split_h:
-            leaves.append(r)
-            continue
-        # Choose orientation
-        if can_split_v and (not can_split_h or r.w > r.h or rng.random() < 0.5):
-            x = float(rng.uniform(r.x0 + min_w, r.x1 - min_w))
-            splits.append(('V', x, r.y0, r.y1))
-            left = _Rect(r.x0, r.y0, x, r.y1)
-            right = _Rect(x, r.y0, r.x1, r.y1)
-            # Recurse
-            stack.append(left)
-            stack.append(right)
-        else:
-            y = float(rng.uniform(r.y0 + min_h, r.y1 - min_h))
-            splits.append(('H', y, r.x0, r.x1))
-            bottom = _Rect(r.x0, r.y0, r.x1, y)
-            top = _Rect(r.x0, y, r.x1, r.y1)
-            stack.append(bottom)
-            stack.append(top)
-
-    return leaves, splits
-
-
-def _draw_bsp_splits_as_walls(
-    trans: np.ndarray,
-    refl: np.ndarray,
-    nx_img: np.ndarray,
-    ny_img: np.ndarray,
-    splits: List[Tuple[str, float, float, float]],
-    *,
-    thickness_px: float,
-    trans_db_range: Tuple[float, float],
-    refl_db_range: Tuple[float, float],
-    door_prob: float,
-    door_width_px_range: Tuple[float, float],
-    pixel_size_m: float,
-    walls_out: List[WallSpec],
-    rng: np.random.Generator,
-) -> None:
-    """
-    Convert partition splits into drawable wall segments with optional door gaps.
-    For each split, we sample a dB pair and optionally carve a gap of given width.
-    """
-    for split in splits:
-        orient, c, a0, a1 = split
-        # Sample properties per wall
-        t_db = float(rng.uniform(*trans_db_range))
-        r_db = float(rng.uniform(*refl_db_range))
-        half_th = 0.5 * max(1.0, thickness_px)
-
-        length = abs(a1 - a0)
-        has_door = (rng.random() < max(0.0, min(1.0, door_prob))) and (length > 4 * half_th)
-        door_lo = door_hi = None
-        if has_door:
-            w_px = float(rng.uniform(*door_width_px_range))
-            w_px = max(2.0, min(w_px, length - 2 * half_th))
-            center = float(rng.uniform(a0 + half_th + 0.5 * w_px, a1 - half_th - 0.5 * w_px))
-            door_lo = center - 0.5 * w_px
-            door_hi = center + 0.5 * w_px
-
-        # Build up to two segments excluding the door gap
-        segments: List[Tuple[float, float, float, float, float, float]] = []  # x0,y0,x1,y1,nx,ny
-        if orient == 'V':
-            # vertical line x=c, spanning y in [a0,a1]
-            nx, ny = 1.0, 0.0
-            if has_door:
-                if door_lo > a0:
-                    segments.append((c, a0, c, door_lo, nx, ny))
-                if door_hi < a1:
-                    segments.append((c, door_hi, c, a1, nx, ny))
-            else:
-                segments.append((c, a0, c, a1, nx, ny))
-        else:
-            # horizontal line y=c, spanning x in [a0,a1]
-            nx, ny = 0.0, 1.0
-            if has_door:
-                if door_lo > a0:
-                    segments.append((a0, c, door_lo, c, nx, ny))
-                if door_hi < a1:
-                    segments.append((door_hi, c, a1, c, nx, ny))
-            else:
-                segments.append((a0, c, a1, c, nx, ny))
-
-        for (x0, y0, x1, y1, nxw, nyw) in segments:
-            rasterize_thick_segment(trans, nx_img, ny_img, x0, y0, x1, y1, thickness_px, t_db, nxw, nyw, op="max")
-            rasterize_thick_segment(refl, nx_img, ny_img, x0, y0, x1, y1, thickness_px, r_db, nxw, nyw, op="max")
-            # Record metadata
-            walls_out.append(
-                WallSpec(
-                    wall_id=len(walls_out),
-                    start_m=(pixels_to_meters(x0, pixel_size_m), pixels_to_meters(y0, pixel_size_m)),
-                    end_m=(pixels_to_meters(x1, pixel_size_m), pixels_to_meters(y1, pixel_size_m)),
-                    start_px=(int(round(x0)), int(round(y0))),
-                    end_px=(int(round(x1)), int(round(y1))),
-                    thickness_m=pixels_to_meters(thickness_px, pixel_size_m),
-                    thickness_px=float(thickness_px),
-                    orientation_rad=(0.0 if orient == 'H' else math.pi * 0.5),
-                    length_m=pixels_to_meters(math.hypot(x1 - x0, y1 - y0), pixel_size_m),
-                    transmittance_db=t_db,
-                    reflectance_db=r_db,
-                    normal_xy=(nxw, nyw),
-                )
-            )
-
-
-def generate_room(
-    *,
-    width_m: float,
-    height_m: float,
-    wall_density_per_100sqm: float = 2.0,
-    pixel_size_m: float = 0.25,
-    outer_wall_thickness_m: float = 0.3,
-    transmittance_db_range: Tuple[float, float] = (6.0, 18.0),
-    reflectance_db_range: Tuple[float, float] = (2.0, 10.0),
-    wall_length_m_range: Tuple[float, float] = (2.0, 10.0),
-    wall_thickness_m_range: Tuple[float, float] = (0.15, 0.6),
-    max_overlap_fraction: float = 0.15,
-    layout: str = "bsp",
-    min_room_w_m: float = 8.0,
-    min_room_h_m: float = 8.0,
-    door_prob: float = 0.3,
-    door_width_m_range: Tuple[float, float] = (0.7, 1.2),
-    seed: Optional[int] = None,
-    save_dir: Optional[str] = None,
-    basename: str = "room",
-) -> Dict[str, Any]:
-    """
-    Generate a synthetic room with:
-      - transmittance map (dB per wall crossing)
-      - reflectance map (dB per reflection on wall)
-      - normals map (nx, ny per pixel; 0 outside walls)
-
-    Returns a dict with: trans (H,W), refl (H,W), nx (H,W), ny (H,W), meta (RoomMeta).
-    Optionally saves arrays to '<save_dir>/<basename>_maps.npz' and metadata to JSON.
-    """
-    assert width_m > 0 and height_m > 0, "Room dimensions must be positive"
-    assert pixel_size_m > 0, "pixel_size_m must be positive"
-
-    rng = _rng(seed)
-
-    w_px = int(round(width_m / pixel_size_m))
-    h_px = int(round(height_m / pixel_size_m))
-    w_px = max(8, w_px)
-    h_px = max(8, h_px)
-
-    # Initialize maps
-    trans = np.zeros((h_px, w_px), dtype=np.float32)
-    refl = np.zeros((h_px, w_px), dtype=np.float32)
-    nx_img = np.zeros((h_px, w_px), dtype=np.float32)
-    ny_img = np.zeros((h_px, w_px), dtype=np.float32)
-
-    walls: List[WallSpec] = []
-
-    # Helper canvas for overlap control
-    occupancy = np.zeros((h_px, w_px), dtype=np.uint8)
-
-    def _estimate_overlap_fraction(mask_new: np.ndarray) -> float:
-        inter = (occupancy & mask_new).sum()
-        area = int(mask_new.sum())
-        if area == 0:
-            return 0.0
-        return float(inter) / float(area)
-
-    # Draw outer boundary walls as a rectangle inset by half thickness
-    ow_th_m = float(max(0.05, outer_wall_thickness_m))
-    ow_th_px = float(max(1.0, meters_to_pixels(ow_th_m, pixel_size_m)))
-    half_ow = 0.5 * ow_th_px
-    # Choose a mid-strength dB for outer walls
-    ow_trans_db = 0.5 * (transmittance_db_range[0] + transmittance_db_range[1])
-    ow_refl_db = 0.5 * (reflectance_db_range[0] + reflectance_db_range[1])
-
-    # Top and bottom segments (horizontal)
-    for y in [half_ow, h_px - 1 - half_ow]:
-        x0, y0 = 1 + half_ow, y
-        x1, y1 = w_px - 2 - half_ow, y
-        angle = 0.0  # along +x
-        nxw, nyw = 0.0, 1.0 if y < (h_px / 2.0) else -1.0
-        rasterize_thick_segment(trans, nx_img, ny_img, x0, y0, x1, y1, ow_th_px, ow_trans_db, nxw, nyw, op="max")
-        rasterize_thick_segment(refl, nx_img, ny_img, x0, y0, x1, y1, ow_th_px, ow_refl_db, nxw, nyw, op="max")
-        walls.append(
-            WallSpec(
-                wall_id=len(walls),
-                start_m=(pixels_to_meters(x0, pixel_size_m), pixels_to_meters(y0, pixel_size_m)),
-                end_m=(pixels_to_meters(x1, pixel_size_m), pixels_to_meters(y1, pixel_size_m)),
-                start_px=(int(round(x0)), int(round(y0))),
-                end_px=(int(round(x1)), int(round(y1))),
-                thickness_m=ow_th_m,
-                thickness_px=ow_th_px,
-                orientation_rad=0.0,
-                length_m=pixels_to_meters(abs(x1 - x0), pixel_size_m),
-                transmittance_db=ow_trans_db,
-                reflectance_db=ow_refl_db,
-                normal_xy=(nxw, nyw),
-            )
-        )
-    # Left and right segments (vertical)
-    for x in [half_ow, w_px - 1 - half_ow]:
-        x0, y0 = x, 1 + half_ow
-        x1, y1 = x, h_px - 2 - half_ow
-        angle = math.pi * 0.5  # along +y
-        nxw, nyw = 1.0 if x < (w_px / 2.0) else -1.0, 0.0
-        rasterize_thick_segment(trans, nx_img, ny_img, x0, y0, x1, y1, ow_th_px, ow_trans_db, nxw, nyw, op="max")
-        rasterize_thick_segment(refl, nx_img, ny_img, x0, y0, x1, y1, ow_th_px, ow_refl_db, nxw, nyw, op="max")
-        walls.append(
-            WallSpec(
-                wall_id=len(walls),
-                start_m=(pixels_to_meters(x0, pixel_size_m), pixels_to_meters(y0, pixel_size_m)),
-                end_m=(pixels_to_meters(x1, pixel_size_m), pixels_to_meters(y1, pixel_size_m)),
-                start_px=(int(round(x0)), int(round(y0))),
-                end_px=(int(round(x1)), int(round(y1))),
-                thickness_m=ow_th_m,
-                thickness_px=ow_th_px,
-                orientation_rad=angle,
-                length_m=pixels_to_meters(abs(y1 - y0), pixel_size_m),
-                transmittance_db=ow_trans_db,
-                reflectance_db=ow_refl_db,
-                normal_xy=(nxw, nyw),
-            )
-        )
-
-    # Update occupancy for the boundary
-    occupancy[...] = (trans > 0).astype(np.uint8)
-
-    # Common door width range in pixels for branches that need it
-    door_w_px_range = (
-        float(max(0.5, meters_to_pixels(door_width_m_range[0], pixel_size_m))),
-        float(max(0.5, meters_to_pixels(door_width_m_range[1], pixel_size_m))),
-    )
-
-    if layout.lower() == "bsp":
-        # Build axis-aligned internal walls using BSP with door gaps
-        min_w_px = meters_to_pixels(max(0.5, min_room_w_m), pixel_size_m)
-        min_h_px = meters_to_pixels(max(0.5, min_room_h_m), pixel_size_m)
-        root = _Rect(half_ow + 2.0, half_ow + 2.0, w_px - 1 - half_ow - 2.0, h_px - 1 - half_ow - 2.0)
-        _, splits = _bsp_partition(root, min_w_px, min_h_px, rng)
-        wall_th_px = float(max(1.0, meters_to_pixels(float(rng.uniform(*wall_thickness_m_range)), pixel_size_m)))
-        _draw_bsp_splits_as_walls(
-            trans,
-            refl,
-            nx_img,
-            ny_img,
-            splits,
-            thickness_px=wall_th_px,
-            trans_db_range=transmittance_db_range,
-            refl_db_range=reflectance_db_range,
-            door_prob=door_prob,
-            door_width_px_range=door_w_px_range,
-            pixel_size_m=pixel_size_m,
-            walls_out=walls,
-            rng=rng,
-        )
-        occupancy[...] = (trans > 0).astype(np.uint8)
-    elif layout.lower() == "corridor":
-        # Main horizontal corridor spine(s) and bays filled with mini-BSP
-        corridor_w_m = max(2.0, min(6.0, 0.08 * height_m))
-        corridor_w_px = meters_to_pixels(corridor_w_m, pixel_size_m)
-        y_center = h_px * 0.5
-        # Draw central corridor boundaries as two horizontal walls with frequent doors
-        t_db = 0.5 * (transmittance_db_range[0] + transmittance_db_range[1])
-        r_db = 0.5 * (reflectance_db_range[0] + reflectance_db_range[1])
-        door_w_px_range = (
-            float(max(0.5, meters_to_pixels(door_width_m_range[0], pixel_size_m))),
-            float(max(0.5, meters_to_pixels(door_width_m_range[1], pixel_size_m))),
-        )
-        wall_th_px = float(max(1.0, meters_to_pixels(float(np.mean(wall_thickness_m_range)), pixel_size_m)))
-        gaps_top = []; gaps_bot = []
-        # Create repeated openings along the corridor
-        # Space corridor openings approximately every 15–30 meters
-        step_m = float(np.random.uniform(15.0, 30.0))
-        step = max(10.0, meters_to_pixels(step_m, pixel_size_m))
-        x = half_ow + meters_to_pixels(5.0, pixel_size_m)
-        while x + step < w_px - half_ow - 4.0:
-            w = float(np.clip(np.mean(door_w_px_range) * np.random.uniform(0.7, 1.3), 2.0, step * 0.6))
-            gaps_top.append((x, x + w))
-            gaps_bot.append((x, x + w))
-            x += step
-        _draw_axis_segment_with_gaps(trans, refl, nx_img, ny_img, orient='H', c=y_center - 0.5 * corridor_w_px,
-                                      a0=half_ow + 2.0, a1=w_px - 1 - half_ow - 2.0,
-                                      thickness_px=wall_th_px, t_db=t_db, r_db=r_db, pixel_size_m=pixel_size_m,
-                                      walls_out=walls, gaps=gaps_top)
-        _draw_axis_segment_with_gaps(trans, refl, nx_img, ny_img, orient='H', c=y_center + 0.5 * corridor_w_px,
-                                      a0=half_ow + 2.0, a1=w_px - 1 - half_ow - 2.0,
-                                      thickness_px=wall_th_px, t_db=t_db, r_db=r_db, pixel_size_m=pixel_size_m,
-                                      walls_out=walls, gaps=gaps_bot)
-
-        # Fill upper and lower bays with small BSP partitions
-        for (y0, y1) in [(half_ow + 2.0, y_center - 0.5 * corridor_w_px - 2.0), (y_center + 0.5 * corridor_w_px + 2.0, h_px - 1 - half_ow - 2.0)]:
-            if y1 - y0 < 10:
-                continue
-            bay = _Rect(half_ow + 2.0, y0, w_px - 1 - half_ow - 2.0, y1)
-            min_w_px = meters_to_pixels(max(1.5, min_room_w_m), pixel_size_m)
-            min_h_px = meters_to_pixels(max(1.5, min_room_h_m), pixel_size_m)
-            _, splits = _bsp_partition(bay, min_w_px, min_h_px, rng)
-            _draw_bsp_splits_as_walls(trans, refl, nx_img, ny_img, splits,
-                                      thickness_px=wall_th_px,
-                                      trans_db_range=transmittance_db_range,
-                                      refl_db_range=reflectance_db_range,
-                                      door_prob=door_prob * 0.5,
-                                      door_width_px_range=door_w_px_range,
-                                      pixel_size_m=pixel_size_m,
-                                      walls_out=walls,
-                                      rng=rng)
-        occupancy[...] = (trans > 0).astype(np.uint8)
-    elif layout.lower() == "courtyard":
-        # Outer ring corridor (courtyard/atrium) and inner partitions, some curved corners
-        t_db = 0.5 * (transmittance_db_range[0] + transmittance_db_range[1])
-        r_db = 0.5 * (reflectance_db_range[0] + reflectance_db_range[1])
-        wall_th_px = float(max(1.0, meters_to_pixels(float(np.mean(wall_thickness_m_range)), pixel_size_m)))
-        inset = max(10.0, min(w_px, h_px) * 0.15)
-        x0 = half_ow + inset; y0 = half_ow + inset
-        x1 = w_px - 1 - half_ow - inset; y1 = h_px - 1 - half_ow - inset
-        # Straight segments of inner ring
-        _draw_axis_segment_with_gaps(trans, refl, nx_img, ny_img, orient='H', c=y0, a0=x0, a1=x1, thickness_px=wall_th_px,
-                                      t_db=t_db, r_db=r_db, pixel_size_m=pixel_size_m, walls_out=walls, gaps=[])
-        _draw_axis_segment_with_gaps(trans, refl, nx_img, ny_img, orient='H', c=y1, a0=x0, a1=x1, thickness_px=wall_th_px,
-                                      t_db=t_db, r_db=r_db, pixel_size_m=pixel_size_m, walls_out=walls, gaps=[])
-        _draw_axis_segment_with_gaps(trans, refl, nx_img, ny_img, orient='V', c=x0, a0=y0, a1=y1, thickness_px=wall_th_px,
-                                      t_db=t_db, r_db=r_db, pixel_size_m=pixel_size_m, walls_out=walls, gaps=[])
-        _draw_axis_segment_with_gaps(trans, refl, nx_img, ny_img, orient='V', c=x1, a0=y0, a1=y1, thickness_px=wall_th_px,
-                                      t_db=t_db, r_db=r_db, pixel_size_m=pixel_size_m, walls_out=walls, gaps=[])
-        # Optional rounded entries at midpoints
-        rad = max(8.0, min(w_px, h_px) * 0.07)
-        for side in [(0.5 * (x0 + x1), y0, math.pi, 0.0), (0.5 * (x0 + x1), y1, 0.0, math.pi)]:
-            cx, cy, th0, th1 = side
-            _draw_arc_wall(trans, refl, nx_img, ny_img, cx=cx, cy=cy, radius_px=rad, theta0=th0, theta1=th1,
-                           thickness_px=wall_th_px, t_db=t_db, r_db=r_db, pixel_size_m=pixel_size_m, walls_out=walls)
-        # Fill inside with a small BSP
-        inner = _Rect(x0 + 4.0, y0 + 4.0, x1 - 4.0, y1 - 4.0)
-        min_w_px = meters_to_pixels(max(2.0, min_room_w_m), pixel_size_m)
-        min_h_px = meters_to_pixels(max(2.0, min_room_h_m), pixel_size_m)
-        _, splits = _bsp_partition(inner, min_w_px, min_h_px, rng)
-        _draw_bsp_splits_as_walls(trans, refl, nx_img, ny_img, splits,
-                                  thickness_px=wall_th_px,
-                                  trans_db_range=transmittance_db_range,
-                                  refl_db_range=reflectance_db_range,
-                                  door_prob=door_prob * 0.6,
-                                  door_width_px_range=door_w_px_range,
-                                  pixel_size_m=pixel_size_m,
-                                  walls_out=walls,
-                                  rng=rng)
-        occupancy[...] = (trans > 0).astype(np.uint8)
+def draw_rect_border(mask, x0, y0, x1, y1, width_px, rounded_r_px=0):
+    """Draw a rectangle border (with optional rounded corners)."""
+    x0, y0, x1, y1 = float(x0), float(y0), float(x1), float(y1)
+    if rounded_r_px <= 1:
+        poly = [(x0, y0), (x1, y0), (x1, y1), (x0, y1)]
+        draw_polyline(mask, poly, width_px, closed=True)
     else:
-        # Random angled walls (previous behavior)
-        area_m2 = width_m * height_m
-        n_internal = _sample_num_walls(area_m2, wall_density_per_100sqm, rng)
+        r = float(rounded_r_px)
+        r = min(r, (x1 - x0) / 2 - 1, (y1 - y0) / 2 - 1)
+        # Build a rounded rectangle as poly with arc samples at corners
+        def arc(cx, cy, start_ang, end_ang, rad, n=16):
+            ts = np.linspace(start_ang, end_ang, n)
+            return [(cx + rad * np.cos(t), cy + rad * np.sin(t)) for t in ts]
 
-        for _ in range(n_internal):
-            length_m = float(rng.uniform(*wall_length_m_range))
-            thickness_m = float(rng.uniform(*wall_thickness_m_range))
-            trans_db = float(rng.uniform(*transmittance_db_range))
-            refl_db = float(rng.uniform(*reflectance_db_range))
+        pts = []
+        # top-right corner (clockwise path)
+        pts += arc(x1 - r, y0 + r, -np.pi/2, 0, r)
+        # right edge to bottom-right
+        pts += arc(x1 - r, y1 - r, 0, np.pi/2, r)
+        # bottom-right to bottom-left
+        pts += arc(x0 + r, y1 - r, np.pi/2, np.pi, r)
+        # bottom-left to top-left
+        pts += arc(x0 + r, y0 + r, np.pi, 3*np.pi/2, r)
+        draw_polyline(mask, pts, width_px, closed=True)
 
-            length_px = meters_to_pixels(length_m, pixel_size_m)
-            thickness_px = max(1.0, meters_to_pixels(thickness_m, pixel_size_m))
-            margin_px = max(2.0, thickness_px)
+def draw_quadratic_bezier(mask, p0, p1, pc, width_px, samples=40):
+    """Quadratic Bezier curve with thick stroke."""
+    t = np.linspace(0.0, 1.0, samples)
+    x = (1 - t) ** 2 * p0[0] + 2 * (1 - t) * t * pc[0] + t ** 2 * p1[0]
+    y = (1 - t) ** 2 * p0[1] + 2 * (1 - t) * t * pc[1] + t ** 2 * p1[1]
+    pts = list(zip(x, y))
+    draw_polyline(mask, pts, width_px, closed=False)
 
-            x0, y0, x1, y1, ang = _random_segment_within_room(w_px, h_px, length_px, rng, margin_px=margin_px)
-            nxw = -math.sin(ang)
-            nyw = math.cos(ang)
+def dilate(binmask, r=1):
+    """Binary dilation with a square structuring element of radius r."""
+    if r <= 0:
+        return binmask.copy()
+    H, W = binmask.shape
+    out = np.zeros_like(binmask, dtype=bool)
+    # Sliding window via integral trick: use convolution by summing shifted versions
+    for dy in range(-r, r + 1):
+        ys = slice(max(0, dy), H + min(0, dy))
+        yd = slice(max(0, -dy), H + min(0, -dy))
+        for dx in range(-r, r + 1):
+            xs = slice(max(0, dx), W + min(0, dx))
+            xd = slice(max(0, -dx), W + min(0, -dx))
+            out[yd, xd] |= binmask[ys, xs]
+    return out
 
-            mask_new = np.zeros_like(occupancy)
-            rasterize_thick_segment(mask_new, mask_new, mask_new, x0, y0, x1, y1, thickness_px, 1.0, 0.0, 0.0, op="max")
-            overlap = _estimate_overlap_fraction(mask_new)
-            if overlap > max_overlap_fraction:
+def erode(binmask, r=1):
+    """Binary erosion with a square structuring element of radius r."""
+    if r <= 0:
+        return binmask.copy()
+    H, W = binmask.shape
+    out = np.ones_like(binmask, dtype=bool)
+    for dy in range(-r, r + 1):
+        ys = slice(max(0, dy), H + min(0, dy))
+        yd = slice(max(0, -dy), H + min(0, -dy))
+        for dx in range(-r, r + 1):
+            xs = slice(max(0, dx), W + min(0, dx))
+            xd = slice(max(0, -dx), W + min(0, -dx))
+            out[yd, xd] &= binmask[ys, xs]
+    return out
+
+def closing(binmask, r=1):
+    return erode(dilate(binmask, r), r)
+
+# ---------- Generator ----------
+
+def generate_floor_mask(
+    width_m=200, height_m=100, px_per_m=4, seed=None,
+    style="office_hospital_mix"
+):
+    """
+    Returns (mask: HxW bool array).
+    1 = wall, 0 = no wall.
+    """
+    rng = np.random.default_rng(seed)
+
+    W = int(round(width_m * px_per_m))
+    H = int(round(height_m * px_per_m))
+
+    walls = np.zeros((H, W), dtype=bool)
+    carve = np.zeros((H, W), dtype=bool)  # areas to clear (corridors)
+
+    # ---- Parameters sampled with realistic ranges ----
+    ext_th = rng.uniform(0.28, 0.45) * px_per_m  # exterior wall thickness (m -> px)
+    part_th = rng.uniform(0.09, 0.14) * px_per_m # interior partitions
+    core_th = rng.uniform(0.20, 0.30) * px_per_m # core walls
+    curve_prob = 0.18
+    diag_prob  = 0.06
+
+    corridor_w = rng.uniform(1.9, 2.6) * px_per_m  # clear width
+    corridor_wall_th = rng.uniform(0.10, 0.18) * px_per_m
+    belt_offset = rng.uniform(7.0, 12.0) * px_per_m  # ring distance from exterior
+
+    # grid module for BSP
+    module_m = rng.choice([3.0, 3.6, 4.2, 4.8, 5.4])
+    module_px = module_m * px_per_m
+    min_room_w_m = rng.uniform(2.4, 2.9)
+    min_room_w = min_room_w_m * px_per_m
+    max_aspect = 3.5
+
+    # ----- Outer footprint with optional rounded corners -----
+    round_r = rng.uniform(0.0, 6.0) * px_per_m if rng.random() < 0.65 else 0.0
+    draw_rect_border(walls, 2, 2, W - 3, H - 3, ext_th, rounded_r_px=round_r)
+
+    # ----- Cores (stairs/elevators) -----
+    n_cores = rng.integers(1, 4)
+    core_rects = []
+    for _ in range(n_cores):
+        side_m = rng.uniform(6.5, 12.0)
+        cw = int(side_m * px_per_m)
+        ch = int((side_m * rng.uniform(0.85, 1.2)) * px_per_m)
+        cx = rng.integers(W // 5, 4 * W // 5 - cw)
+        cy = rng.integers(H // 5, 4 * H // 5 - ch)
+        rect = (cx, cy, cx + cw, cy + ch)
+        core_rects.append(rect)
+        draw_rect_border(walls, *rect, core_th, rounded_r_px=int(rng.uniform(0, 2.0) * px_per_m))
+
+    # ----- Corridor ring (belt) -----
+    # Define inner rectangle for the ring centerline
+    rx0 = int(2 + belt_offset)
+    ry0 = int(2 + belt_offset)
+    rx1 = int(W - 3 - belt_offset)
+    ry1 = int(H - 3 - belt_offset)
+    if rx1 - rx0 > 40 and ry1 - ry0 > 40:
+        # Ring walls (draw thicker, then carve the corridor void)
+        draw_rect_border(walls, rx0, ry0, rx1, ry1, corridor_w + 2 * corridor_wall_th, rounded_r_px=int(round_r * 0.6))
+        draw_rect_border(carve, rx0, ry0, rx1, ry1, corridor_w, rounded_r_px=int(round_r * 0.6))
+
+    # ----- Corridor spines -----
+    n_spines = rng.integers(1, 4)
+    for _ in range(n_spines):
+        if rng.random() < 0.6:
+            # vertical spine
+            x = rng.integers(int(W * 0.25), int(W * 0.75))
+            draw_thick_segment(walls, (x, 3), (x, H - 4), corridor_w + 2 * corridor_wall_th)
+            draw_thick_segment(carve, (x, 3), (x, H - 4), corridor_w)
+        else:
+            # horizontal spine
+            y = rng.integers(int(H * 0.25), int(H * 0.75))
+            draw_thick_segment(walls, (3, y), (W - 4, y), corridor_w + 2 * corridor_wall_th)
+            draw_thick_segment(carve, (3, y), (W - 4, y), corridor_w)
+
+    # Connect cores to nearest spine/ring with short corridors
+    def nearest_point_on_ring(cx, cy):
+        # project to the ring rectangle edges
+        if rx1 - rx0 <= 0 or ry1 - ry0 <= 0:
+            return (cx, cy)
+        # choose nearest edge center
+        cands = [
+            (cx, ry0), (cx, ry1), (rx0, cy), (rx1, cy)
+        ]
+        d2 = [(cx - px) ** 2 + (cy - py) ** 2 for (px, py) in cands]
+        return cands[int(np.argmin(d2))]
+
+    for (x0, y0, x1, y1) in core_rects:
+        cx = (x0 + x1) // 2
+        cy = (y0 + y1) // 2
+        tx, ty = nearest_point_on_ring(cx, cy)
+        draw_thick_segment(walls, (cx, cy), (tx, ty), corridor_w + 2 * corridor_wall_th)
+        draw_thick_segment(carve, (cx, cy), (tx, ty), corridor_w)
+
+    # ----- Partitioning via stochastic BSP (axis-aligned) -----
+    # We place splits; later corridors will carve through to create connectivity.
+    # Start with one big rectangle (keep a small inset from exterior walls)
+    inset = int(ext_th + px_per_m * 0.6)
+    stack = [(inset, inset, W - inset - 1, H - inset - 1)]
+    splits_drawn = 0
+    max_splits = 180  # keep reasonable for speed
+
+    def draw_split(rect, vertical, s):
+        x0, y0, x1, y1 = rect
+        if vertical:
+            p0, p1 = (s, y0), (s, y1)
+        else:
+            p0, p1 = (x0, s), (x1, s)
+        draw_thick_segment(walls, p0, p1, part_th)
+
+    while stack and splits_drawn < max_splits:
+        # pick the largest rect
+        areas = [ (r[2]-r[0])*(r[3]-r[1]) for r in stack ]
+        idx = int(np.argmax(areas))
+        x0, y0, x1, y1 = stack.pop(idx)
+        w = x1 - x0
+        h = y1 - y0
+        if w < 2 * min_room_w or h < 2 * min_room_w:
+            continue
+
+        # decide orientation by aspect + randomness
+        if (w > h * 1.1 and rng.random() < 0.8) or (w > h and rng.random() < 0.6):
+            vertical = True
+        elif (h > w * 1.1 and rng.random() < 0.8) or (h > w and rng.random() < 0.6):
+            vertical = False
+        else:
+            vertical = rng.random() < 0.5
+
+        if vertical:
+            smin = x0 + int(min_room_w)
+            smax = x1 - int(min_room_w)
+            if smax - smin < module_px * 0.5:
                 continue
-            rasterize_thick_segment(trans, nx_img, ny_img, x0, y0, x1, y1, thickness_px, trans_db, nxw, nyw, op="max")
-            rasterize_thick_segment(refl, nx_img, ny_img, x0, y0, x1, y1, thickness_px, refl_db, nxw, nyw, op="max")
-            occupancy |= (mask_new > 0).astype(np.uint8)
-            walls.append(
-                WallSpec(
-                    wall_id=len(walls),
-                    start_m=(pixels_to_meters(x0, pixel_size_m), pixels_to_meters(y0, pixel_size_m)),
-                    end_m=(pixels_to_meters(x1, pixel_size_m), pixels_to_meters(y1, pixel_size_m)),
-                    start_px=(int(round(x0)), int(round(y0))),
-                    end_px=(int(round(x1)), int(round(y1))),
-                    thickness_m=thickness_m,
-                    thickness_px=thickness_px,
-                    orientation_rad=ang,
-                    length_m=length_m,
-                    transmittance_db=trans_db,
-                    reflectance_db=refl_db,
-                    normal_xy=(nxw, nyw),
-                )
-            )
+            # snap to module with jitter
+            s = int(rng.normal(rng.integers(smin, smax), module_px * 0.12))
+            s = int(np.clip(s, smin, smax))
+            if rng.random() < curve_prob:
+                # Draw a subtle curved wall instead of straight
+                p0 = (s, y0)
+                p1 = (s, y1)
+                ctrl = (s + rng.normal(0, module_px * 0.5), (y0 + y1) / 2 + rng.normal(0, module_px * 0.6))
+                draw_quadratic_bezier(walls, p0, p1, ctrl, part_th, samples=48)
+            elif rng.random() < diag_prob:
+                # 45-ish diagonal split
+                dy = rng.integers(-int(h*0.25), int(h*0.25))
+                draw_thick_segment(walls, (s, y0), (s + dy, y1), part_th)
+            else:
+                draw_split((x0, y0, x1, y1), True, s)
+            # push children
+            stack.append((x0, y0, s, y1))
+            stack.append((s, y0, x1, y1))
+        else:
+            smin = y0 + int(min_room_w)
+            smax = y1 - int(min_room_w)
+            if smax - smin < module_px * 0.5:
+                continue
+            s = int(rng.normal(rng.integers(smin, smax), module_px * 0.12))
+            s = int(np.clip(s, smin, smax))
+            if rng.random() < curve_prob:
+                p0 = (x0, s)
+                p1 = (x1, s)
+                ctrl = ((x0 + x1) / 2 + rng.normal(0, module_px * 0.6), s + rng.normal(0, module_px * 0.5))
+                draw_quadratic_bezier(walls, p0, p1, ctrl, part_th, samples=48)
+            elif rng.random() < diag_prob:
+                dx = rng.integers(-int(w*0.25), int(w*0.25))
+                draw_thick_segment(walls, (x0, s), (x1, s + dx), part_th)
+            else:
+                draw_split((x0, y0, x1, y1), False, s)
+            stack.append((x0, y0, x1, s))
+            stack.append((x0, s, x1, y1))
 
-    meta = RoomMeta(
-        width_m=width_m,
-        height_m=height_m,
-        pixel_size_m=pixel_size_m,
-        grid_h=h_px,
-        grid_w=w_px,
-        wall_density_per_100sqm=wall_density_per_100sqm,
-        outer_wall_thickness_m=outer_wall_thickness_m,
-        seed=seed,
-        walls=walls,
-    )
+        splits_drawn += 1
 
-    result = {"trans": trans, "refl": refl, "nx": nx_img, "ny": ny_img, "meta": meta}
+    # ----- Add a rotated "secondary frame" (mixture-of-Manhattan) -----
+    if rng.random() < 0.45:
+        theta = np.deg2rad(rng.uniform(10, 35))
+        ct, st = np.cos(theta), np.sin(theta)
 
-    if save_dir:
-        os.makedirs(save_dir, exist_ok=True)
-        npz_path = os.path.join(save_dir, f"{basename}_maps.npz")
-        json_path = os.path.join(save_dir, f"{basename}_meta.json")
-        np.savez_compressed(npz_path, trans=trans, refl=refl, nx=nx_img, ny=ny_img)
-        with open(json_path, "w", encoding="utf-8") as f:
-            f.write(meta.to_json())
-        result["paths"] = {"npz": npz_path, "json": json_path}
+        # a few long oblique walls
+        n_oblique = rng.integers(3, 7)
+        for _ in range(n_oblique):
+            # pick a line by sampling intercept along one bounding axis
+            d = rng.uniform(-W*0.2, W*1.2)  # extended range to ensure intersection
+            # parametric form: x*ct + y*st = d
+            # intersect with rectangle bounds to find segment endpoints
+            # test intersections with the 4 borders; collect those inside
+            candidates = []
+            # y=0..H-1
+            for y in (inset, H - inset):
+                x = (d - y * st) / ct
+                if inset <= x <= W - inset:
+                    candidates.append((x, y))
+            for x in (inset, W - inset):
+                y = (d - x * ct) / st if abs(st) > 1e-6 else None
+                if y is not None and inset <= y <= H - inset:
+                    candidates.append((x, y))
+            if len(candidates) >= 2:
+                p0, p1 = candidates[0], candidates[1]
+                # Some curves along the oblique frame
+                if rng.random() < 0.4:
+                    mid = ((p0[0] + p1[0]) / 2, (p0[1] + p1[1]) / 2)
+                    # bend normal to the line
+                    nx, ny = -st, ct
+                    ctrl = (mid[0] + nx * rng.uniform(20, 60), mid[1] + ny * rng.uniform(20, 60))
+                    draw_quadratic_bezier(walls, p0, p1, ctrl, part_th, samples=64)
+                else:
+                    draw_thick_segment(walls, p0, p1, part_th)
 
-    return result
+    # ----- Apply corridor carving (clear the inside of corridors) -----
+    walls = walls & (~carve)
 
+    # ----- Clean-up: closing to fix tiny gaps; trim singletons -----
+    walls = closing(walls, r=1)
+    # remove tiny isolated pixels (degree < 2 in 3x3 neighborhood)
+    H, W = walls.shape
+    neighbors = np.zeros_like(walls, dtype=int)
+    for dy in (-1, 0, 1):
+        ys = slice(max(0, dy), H + min(0, dy))
+        yd = slice(max(0, -dy), H + min(0, -dy))
+        for dx in (-1, 0, 1):
+            if dx == 0 and dy == 0: 
+                continue
+            xs = slice(max(0, dx), W + min(0, dx))
+            xd = slice(max(0, -dx), W + min(0, -dx))
+            neighbors[yd, xd] += walls[ys, xs]
+    walls[(walls == 1) & (neighbors < 2)] = 0
 
-# ---------------------------------------------------------------
-# CLI
-# ---------------------------------------------------------------
+    return walls
 
-def _parse_args():
-    import argparse
+# ---------- UI ----------
 
-    p = argparse.ArgumentParser("Synthetic room generator")
-    p.add_argument("--width_m", type=float, default=200.0)
-    p.add_argument("--height_m", type=float, default=100.0)
-    p.add_argument("--pixel_size_m", type=float, default=0.25)
-    p.add_argument("--density", type=float, default=2.0, help="walls per 100 m^2")
-    p.add_argument("--outer_thickness_m", type=float, default=0.3)
-    p.add_argument("--seed", type=int, default=None)
-    p.add_argument("--save_dir", type=str, default="generated_rooms")
-    p.add_argument("--basename", type=str, default="room")
-    p.add_argument("--layout", type=str, default="bsp", choices=["bsp", "random", "corridor", "courtyard"], help="layout algorithm")
-    p.add_argument("--min_room_w_m", type=float, default=8.0)
-    p.add_argument("--min_room_h_m", type=float, default=8.0)
-    p.add_argument("--door_prob", type=float, default=0.3)
-    p.add_argument("--door_width_m_min", type=float, default=0.7)
-    p.add_argument("--door_width_m_max", type=float, default=1.2)
-    p.add_argument("--viz", action="store_true", help="visualize a generated room instead of saving maps")
-    return p.parse_args()
+def show_generator():
+    width_m, height_m, ppm = 200, 100, 4  # 0.25 m/px -> 800x400
+    # Only use ipywidgets when we're actually in a Jupyter notebook
+    if _HAS_WIDGETS and _in_jupyter():
+        btn = widgets.Button(description="New floor", button_style="primary", tooltip="Generate a new random wall mask")
+        out = widgets.Output()
 
+        def on_click(_):
+            with out:
+                out.clear_output(wait=True)
+                mask = generate_floor_mask(width_m, height_m, ppm)
+                fig = plt.figure(figsize=(10, 5))
+                ax = plt.gca()
+                ax.imshow(mask, cmap="gray_r", interpolation="nearest")
+                ax.set_title("Wall mask (1=wall)")
+                ax.set_axis_off()
+                plt.show()
 
-if __name__ == "__main__":
-    args = _parse_args()
-    if args.viz:
-        import matplotlib.pyplot as plt
-        import numpy as _np
-        from matplotlib.widgets import Button
+        btn.on_click(on_click)
 
-        rng = _np.random.default_rng(args.seed)
-
-        def _gen_one():
-            sd = int(rng.integers(0, 2**31 - 1))
-            return generate_room(
-                width_m=args.width_m,
-                height_m=args.height_m,
-                pixel_size_m=args.pixel_size_m,
-                wall_density_per_100sqm=args.density,
-                outer_wall_thickness_m=args.outer_thickness_m,
-                layout=args.layout,
-                min_room_w_m=args.min_room_w_m,
-                min_room_h_m=args.min_room_h_m,
-                door_prob=args.door_prob,
-                door_width_m_range=(args.door_width_m_min, args.door_width_m_max),
-                seed=sd,
-                save_dir=None,
-            )
-
-        out = _gen_one()
-        trans = out["trans"]; refl = out["refl"]; nx = out["nx"]; ny = out["ny"]; meta = out["meta"]
-
-        print("Room:")
-        print(f"  size_m: {meta.width_m} x {meta.height_m}  grid_px: {meta.grid_w} x {meta.grid_h}  pixel_size: {meta.pixel_size_m} m")
-        print(f"  seed: {meta.seed}  walls: {len(meta.walls)}  density/100m^2: {meta.wall_density_per_100sqm}")
-
-        fig, axes = plt.subplots(1, 3, figsize=(15, 5))
-        plt.subplots_adjust(bottom=0.15)
-        ax0, ax1, ax2 = axes
-
-        im0 = ax0.imshow(trans, origin='lower', cmap='inferno')
-        ax0.set_title('Transmittance (dB)')
-        cb0 = fig.colorbar(im0, ax=ax0, fraction=0.046)
-
-        im1 = ax1.imshow(refl, origin='lower', cmap='magma')
-        ax1.set_title('Reflectance (dB)')
-        cb1 = fig.colorbar(im1, ax=ax1, fraction=0.046)
-
-        mag = _np.hypot(nx, ny)
-        im2 = ax2.imshow(mag, origin='lower', cmap='gray', vmin=0.0, vmax=1.0)
-        ax2.set_title('Normals (magnitude + quiver)')
-        cb2 = fig.colorbar(im2, ax=ax2, fraction=0.046)
-
-        h, w = nx.shape
-        stride = max(1, min(h, w) // 40)
-        yy, xx = _np.mgrid[0:h:stride, 0:w:stride]
-        quiv = ax2.quiver(xx, yy, nx[::stride, ::stride], ny[::stride, ::stride], color='lime', scale=25)
-        quiv_ref = {'q': quiv}
-
-        wall_lines = []
-        def _draw_walls(meta_obj):
-            # remove previous
-            for ln in wall_lines:
-                try:
-                    ln.remove()
-                except Exception:
-                    pass
-            wall_lines.clear()
-            for ws in meta_obj.walls:
-                x0, y0 = ws.start_px
-                x1, y1 = ws.end_px
-                lw = max(1.0, ws.thickness_px * 0.5)
-                ln, = ax0.plot([x0, x1], [y0, y1], color='cyan', linewidth=lw, alpha=0.7)
-                wall_lines.append(ln)
-
-        _draw_walls(meta)
-
-        for ax in axes:
-            ax.set_xlim(0, meta.grid_w - 1)
-            ax.set_ylim(0, meta.grid_h - 1)
-            ax.set_aspect('equal')
-            ax.set_xlabel('x (px)')
-            ax.set_ylabel('y (px)')
-
-        ax_button = plt.axes([0.4, 0.04, 0.2, 0.06])
-        btn = Button(ax_button, 'Sample')
-
-        def on_click(event):
-            out2 = _gen_one()
-            t2 = out2["trans"]; r2 = out2["refl"]; nx2 = out2["nx"]; ny2 = out2["ny"]; meta2 = out2["meta"]
-            im0.set_data(t2)
-            im1.set_data(r2)
-            im2.set_data(_np.hypot(nx2, ny2))
-            # update quiver
-            try:
-                quiv_ref['q'].remove()
-            except Exception:
-                pass
-            h2, w2 = nx2.shape
-            s2 = max(1, min(h2, w2) // 40)
-            yy2, xx2 = _np.mgrid[0:h2:s2, 0:w2:s2]
-            quiv_ref['q'] = ax2.quiver(xx2, yy2, nx2[::s2, ::s2], ny2[::s2, ::s2], color='lime', scale=25)
-            _draw_walls(meta2)
-            for ax in axes:
-                ax.set_xlim(0, meta2.grid_w - 1)
-                ax.set_ylim(0, meta2.grid_h - 1)
-            fig.canvas.draw_idle()
-            print(f"Sampled: seed={meta2.seed} rooms≈{len(meta2.walls)} walls")
-
-        btn.on_clicked(on_click)
-
+        display(btn, out)
+        # initial render
+        on_click(None)
+    else:
+        # Fallback: Matplotlib button inside the figure (less reliable in some Jupyter setups)
+        # Ensure Button is available even if ipywidgets import succeeded.
         try:
-            plt.show()
+            from matplotlib.widgets import Button  # type: ignore
         except Exception:
             pass
-        raise SystemExit(0)
-    out = generate_room(
-        width_m=args.width_m,
-        height_m=args.height_m,
-        pixel_size_m=args.pixel_size_m,
-        wall_density_per_100sqm=args.density,
-        outer_wall_thickness_m=args.outer_thickness_m,
-        layout=args.layout,
-        min_room_w_m=args.min_room_w_m,
-        min_room_h_m=args.min_room_h_m,
-        door_prob=args.door_prob,
-        door_width_m_range=(args.door_width_m_min, args.door_width_m_max),
-        seed=args.seed,
-        save_dir=args.save_dir,
-        basename=args.basename,
-    )
-    paths = out.get("paths", {})
-    if paths:
-        print(f"Saved: {paths.get('npz')} and {paths.get('json')}")
-    else:
-        print("Generation complete (not saved)")
+        mask = generate_floor_mask(width_m, height_m, ppm)
+        fig, ax = plt.subplots(figsize=(10,5))
+        # Place controls at the top so they're not obscured by the toolbar
+        plt.subplots_adjust(top=0.88, bottom=0.06)
+        im = ax.imshow(mask, cmap="gray_r", interpolation="nearest")
+        ax.set_axis_off()
+        ax.set_title("Wall mask (1=wall)")
 
+        # Button at the top center
+        ax_btn = plt.axes([0.40, 0.91, 0.20, 0.06])
+        button = Button(ax_btn, "New floor")
 
+        def regenerate(_=None):
+            im.set_data(generate_floor_mask(width_m, height_m, ppm))
+            fig.canvas.draw_idle()
+
+        button.on_clicked(regenerate)
+        # Convenience: keyboard/mouse shortcuts to regenerate
+        fig.canvas.mpl_connect("key_press_event", lambda e: regenerate() if e.key in ("r", " ", "enter") else None)
+        fig.canvas.mpl_connect("button_press_event", lambda e: regenerate() if e.button == 1 else None)
+        plt.show()
+
+show_generator()
