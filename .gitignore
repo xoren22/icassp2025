@@ -7,6 +7,7 @@ models/
 .vscode/
 backups/
 __pycache__/
+generated_rooms/
 inference_outputs/
 
 # files

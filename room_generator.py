@@ -1,19 +1,14 @@
-# Upgraded floor plan generator:
-# - Adds doors with variable widths conditioned on local wall length
-# - Uses heavy-tailed splitting to diversify room sizes (many small, occasional very large)
-# - Enforces realistic minimum room width (rare very small rooms)
-# - Records full metadata for reproducibility (strokes + carve ops + doors) to JSON
-# - Computes per-pixel wall normals (H x W x 2 float32)
-# - UI: one "New floor" button regenerates; the current plan is saved to /Users/xoren/icassp2025/generated_rooms/*
+# Continuous per-region room-size distribution (no large/small modes)
+# Mix of large & small rooms within the same floor via a single heavy‑tailed law
+# and a lognormal scale factor per region.
+#
+# Keeps: minimum room width logic, doors, normals, metadata, "New floor" button.
 
-import json
-import math
+import json, math
 from dataclasses import dataclass, field
-from typing import List, Tuple, Dict, Any, Optional
-
+from typing import List, Dict, Any, Tuple
 import numpy as np
 import matplotlib.pyplot as plt
-from matplotlib.widgets import Button as MplButton
 
 try:
     import ipywidgets as widgets
@@ -22,14 +17,6 @@ try:
 except Exception:
     _HAS_WIDGETS = False
 
-def _in_notebook():
-    try:
-        from IPython import get_ipython
-        shell = get_ipython().__class__.__name__
-        return shell == 'ZMQInteractiveShell'
-    except Exception:
-        return False
-
 # ---------------- Raster canvas with normals ----------------
 
 @dataclass
@@ -37,9 +24,9 @@ class RasterCanvas:
     H: int
     W: int
     wall: np.ndarray = field(init=False)
-    nx: np.ndarray = field(init=False)   # normal x
-    ny: np.ndarray = field(init=False)   # normal y
-    d: np.ndarray  = field(init=False)   # distance to stroke centerline
+    nx: np.ndarray = field(init=False)
+    ny: np.ndarray = field(init=False)
+    d:  np.ndarray = field(init=False)
     corridor_mask: np.ndarray = field(init=False)
 
     def __post_init__(self):
@@ -49,10 +36,7 @@ class RasterCanvas:
         self.d    = np.full((self.H, self.W), np.inf, dtype=np.float32)
         self.corridor_mask = np.zeros((self.H, self.W), dtype=bool)
 
-    # --- Low-level paint/clear ---
     def _paint_segment(self, p0, p1, width_px, set_wall=True, mark_corridor=False):
-        """Draw a thick segment. Updates normals (pointing outward from centerline).
-        If set_wall=False -> clear region (used for carving corridors or doors)."""
         x0, y0 = float(p0[0]), float(p0[1])
         x1, y1 = float(p1[0]), float(p1[1])
         w = max(1.0, float(width_px))
@@ -74,7 +58,7 @@ class RasterCanvas:
 
         dx = x1 - x0
         dy = y1 - y0
-        L2 = dx * dx + dy * dy
+        L2 = dx*dx + dy*dy
         if L2 == 0:
             cx = np.full_like(gx, x0, dtype=np.float32)
             cy = np.full_like(gy, y0, dtype=np.float32)
@@ -84,20 +68,16 @@ class RasterCanvas:
             cx = x0 + t * dx
             cy = y0 + t * dy
 
-        vx = gx - cx
-        vy = gy - cy
-        d2 = vx * vx + vy * vy
-        inside = d2 <= (r * r)
+        vx = gx - cx; vy = gy - cy
+        d2 = vx*vx + vy*vy
+        inside = d2 <= (r*r)
 
         if set_wall:
-            # Only update normals where this stroke is closer than previous
             closer = inside & (np.sqrt(d2, dtype=np.float32) < self.d[ymin:ymax+1, xmin:xmax+1])
             if np.any(closer):
                 self.wall[ymin:ymax+1, xmin:xmax+1][inside] = True
                 self.d[ymin:ymax+1, xmin:xmax+1][closer] = np.sqrt(d2[closer]).astype(np.float32)
-
-                # Normalize vectors; handle zero-length safely
-                nrm = np.sqrt(vx[closer] * vx[closer] + vy[closer] * vy[closer]).astype(np.float32)
+                nrm = np.sqrt(vx[closer]*vx[closer] + vy[closer]*vy[closer]).astype(np.float32)
                 nz = nrm > 1e-6
                 nx_new = np.zeros_like(nrm, dtype=np.float32)
                 ny_new = np.zeros_like(nrm, dtype=np.float32)
@@ -106,7 +86,6 @@ class RasterCanvas:
                 self.nx[ymin:ymax+1, xmin:xmax+1][closer] = nx_new
                 self.ny[ymin:ymax+1, xmin:xmax+1][closer] = ny_new
         else:
-            # Clear region: remove wall and normals
             if np.any(inside):
                 sub = self.wall[ymin:ymax+1, xmin:xmax+1]
                 will_clear = inside & sub
@@ -118,19 +97,13 @@ class RasterCanvas:
             self.corridor_mask[ymin:ymax+1, xmin:xmax+1] |= inside
 
     def paint_polyline(self, pts, width_px, closed=False, mark_corridor=False):
-        if closed and len(pts) >= 2:
-            seq = pts + [pts[0]]
-        else:
-            seq = pts
-        for i in range(len(seq) - 1):
+        seq = pts + [pts[0]] if (closed and len(pts)>=2) else pts
+        for i in range(len(seq)-1):
             self._paint_segment(seq[i], seq[i+1], width_px, set_wall=True, mark_corridor=mark_corridor)
 
     def carve_polyline(self, pts, width_px, closed=False, mark_corridor=False):
-        if closed and len(pts) >= 2:
-            seq = pts + [pts[0]]
-        else:
-            seq = pts
-        for i in range(len(seq) - 1):
+        seq = pts + [pts[0]] if (closed and len(pts)>=2) else pts
+        for i in range(len(seq)-1):
             self._paint_segment(seq[i], seq[i+1], width_px, set_wall=False, mark_corridor=mark_corridor)
 
     def paint_bezier_quadratic(self, p0, p1, pc, width_px, samples=64, mark_corridor=False):
@@ -140,32 +113,54 @@ class RasterCanvas:
         pts = list(zip(x, y))
         self.paint_polyline(pts, width_px, closed=False, mark_corridor=mark_corridor)
 
-    def carve_bezier_quadratic(self, p0, p1, pc, width_px, samples=64, mark_corridor=False):
-        t = np.linspace(0.0, 1.0, samples)
-        x = (1 - t)**2 * p0[0] + 2*(1 - t)*t * pc[0] + t**2 * p1[0]
-        y = (1 - t)**2 * p0[1] + 2*(1 - t)*t * pc[1] + t**2 * p1[1]
-        pts = list(zip(x, y))
-        self.carve_polyline(pts, width_px, closed=False, mark_corridor=mark_corridor)
+    def paint_rect_border(self, x0, y0, x1, y1, width_px, rounded_r_px=0, samples_per_quadrant=24, mark_corridor=False):
+        # Ensure ordering
+        x0, x1 = (x0, x1) if x0 <= x1 else (x1, x0)
+        y0, y1 = (y0, y1) if y0 <= y1 else (y1, y0)
 
-    def paint_rect_border(self, x0, y0, x1, y1, width_px, rounded_r_px=0, mark_corridor=False):
-        x0, y0, x1, y1 = float(x0), float(y0), float(x1), float(y1)
-        if rounded_r_px <= 1:
-            poly = [(x0, y0), (x1, y0), (x1, y1), (x0, y1)]
-            self.paint_polyline(poly, width_px, closed=True, mark_corridor=mark_corridor)
-        else:
-            r = float(rounded_r_px)
-            r = max(1.0, min(r, (x1 - x0) / 2 - 1, (y1 - y0) / 2 - 1))
-
-            def arc(cx, cy, start_ang, end_ang, rad, n=20):
-                ts = np.linspace(start_ang, end_ang, n)
-                return [(cx + rad*np.cos(t), cy + rad*np.sin(t)) for t in ts]
-
-            pts = []
-            pts += arc(x1 - r, y0 + r, -np.pi/2, 0,           r)
-            pts += arc(x1 - r, y1 - r, 0,           np.pi/2,   r)
-            pts += arc(x0 + r, y1 - r, np.pi/2,     np.pi,     r)
-            pts += arc(x0 + r, y0 + r, np.pi,       3*np.pi/2, r)
+        r = int(max(0, rounded_r_px))
+        if r <= 0:
+            pts = [(x0, y0), (x1, y0), (x1, y1), (x0, y1)]
             self.paint_polyline(pts, width_px, closed=True, mark_corridor=mark_corridor)
+            return
+
+        # Clamp radius to half of min side
+        r = int(min(r, max(0, (x1 - x0) // 2), max(0, (y1 - y0) // 2)))
+        if r == 0:
+            pts = [(x0, y0), (x1, y0), (x1, y1), (x0, y1)]
+            self.paint_polyline(pts, width_px, closed=True, mark_corridor=mark_corridor)
+            return
+
+        # Helper to sample quarter-circle arc
+        def arc(cx, cy, start_ang, end_ang, samples):
+            tt = np.linspace(start_ang, end_ang, samples)
+            xs = cx + r * np.cos(tt)
+            ys = cy + r * np.sin(tt)
+            return list(zip(xs, ys))
+
+        pts = []
+        # Start at top edge (left to right, leaving room for corners)
+        pts.append((x0 + r, y0))
+        pts.append((x1 - r, y0))
+        # Top-right corner (−pi/2 -> 0)
+        pts += arc(x1 - r, y0 + r, -np.pi/2, 0.0, samples_per_quadrant)
+        # Right edge (top to bottom)
+        pts.append((x1, y0 + r))
+        pts.append((x1, y1 - r))
+        # Bottom-right corner (0 -> pi/2)
+        pts += arc(x1 - r, y1 - r, 0.0, np.pi/2, samples_per_quadrant)
+        # Bottom edge (right to left)
+        pts.append((x1 - r, y1))
+        pts.append((x0 + r, y1))
+        # Bottom-left corner (pi/2 -> pi)
+        pts += arc(x0 + r, y1 - r, np.pi/2, np.pi, samples_per_quadrant)
+        # Left edge (bottom to top)
+        pts.append((x0, y1 - r))
+        pts.append((x0, y0 + r))
+        # Top-left corner (pi -> 3pi/2)
+        pts += arc(x0 + r, y0 + r, np.pi, 3*np.pi/2, samples_per_quadrant)
+
+        self.paint_polyline(pts, width_px, closed=True, mark_corridor=mark_corridor)
 
 # ---------------- Utilities ----------------
 
@@ -195,7 +190,6 @@ def closing(binmask, r=1):
     return out2
 
 def connected_components(binmask):
-    """4-connected components labeling, returns labels (int32) and sizes dict."""
     H, W = binmask.shape
     labels = np.full((H, W), -1, dtype=np.int32)
     comp_id = 0
@@ -203,7 +197,6 @@ def connected_components(binmask):
     for y in range(H):
         for x in range(W):
             if binmask[y, x] and labels[y, x] == -1:
-                # BFS
                 qx = [x]; qy = [y]
                 labels[y, x] = comp_id
                 size = 1
@@ -225,18 +218,6 @@ def connected_components(binmask):
 def line_length(p0, p1):
     return float(math.hypot(p1[0]-p0[0], p1[1]-p0[1]))
 
-# Parametric helpers for quadratic Bezier
-def bezier_point(p0, p1, pc, t):
-    x = (1 - t)**2 * p0[0] + 2*(1 - t)*t * pc[0] + t**2 * p1[0]
-    y = (1 - t)**2 * p0[1] + 2*(1 - t)*t * pc[1] + t**2 * p1[1]
-    return (x, y)
-
-def bezier_tangent(p0, p1, pc, t):
-    # derivative of quadratic Bezier
-    dx = 2*(1 - t)*(pc[0] - p0[0]) + 2*t*(p1[0] - pc[0])
-    dy = 2*(1 - t)*(pc[1] - p0[1]) + 2*t*(p1[1] - pc[1])
-    return (dx, dy)
-
 def unit(vx, vy):
     n = math.hypot(vx, vy)
     if n < 1e-6: 
@@ -246,7 +227,6 @@ def unit(vx, vy):
 # ---------------- Generator + metadata ----------------
 
 def generate_floor_scene(width_m=200, height_m=100, px_per_m=4, seed=None):
-    # Seed
     if seed is None:
         seed = int(np.random.SeedSequence().entropy)
     rng = np.random.default_rng(seed)
@@ -257,38 +237,39 @@ def generate_floor_scene(width_m=200, height_m=100, px_per_m=4, seed=None):
     canvas = RasterCanvas(H, W)
     ops: List[Dict[str, Any]] = []
     strokes: List[Dict[str, Any]] = []
-    doors: List[Dict[str, Any]] = []
 
-    # ---- Parameters ----
-    params = {}
-    params['px_per_m'] = float(px_per_m)
+    params = {'px_per_m': float(px_per_m)}
 
     ext_th      = float(rng.uniform(0.28, 0.45) * px_per_m)
     part_th     = float(rng.uniform(0.09, 0.14) * px_per_m)
     core_th     = float(rng.uniform(0.20, 0.30) * px_per_m)
     curve_prob  = float(0.20)
     diag_prob   = float(0.08)
-    big_room_mode = bool(rng.random() < 0.35)
 
-    corridor_w        = float(rng.uniform(1.9, 2.7) * px_per_m)  # clear
+    corridor_w        = float(rng.uniform(1.9, 2.7) * px_per_m)
     corridor_wall_th  = float(rng.uniform(0.10, 0.18) * px_per_m)
     belt_offset       = float(rng.uniform(7.0, 12.0) * px_per_m)
 
     module_m = float(rng.choice([3.0, 3.6, 4.2, 4.8, 5.4]))
     module_px = module_m * px_per_m
-    # Minimum room width (rarely allow a small one)
+
+    # Minimum room width (unchanged policy)
     if rng.random() < 0.08:
-        min_room_w_m = rng.uniform(1.3, 2.0)  # rare: allow a small room
+        min_room_w_m = rng.uniform(1.3, 2.0)  # rare small
     else:
         min_room_w_m = rng.uniform(2.4, 2.9)
     min_room_w = float(min_room_w_m * px_per_m)
-    # Heavy-tailed target areas (m^2)
-    pareto_alpha = 1.6
-    base_area_m2 = rng.uniform(18.0, 35.0)  # typical small offices
-    params.update(dict(ext_th=ext_th, part_th=part_th, core_th=core_th, curve_prob=curve_prob,
-                       diag_prob=diag_prob, corridor_w=corridor_w, corridor_wall_th=corridor_wall_th,
-                       belt_offset=belt_offset, module_m=module_m, min_room_w_m=min_room_w_m,
-                       pareto_alpha=pareto_alpha, base_area_m2=base_area_m2, big_room_mode=big_room_mode))
+
+    # Single continuous heavy-tailed law per region: Pareto(alpha) * LogNormal
+    alpha = 1.25            # heavier tail -> more big rooms *and* small ones co-existing
+    base_area_m2 = rng.uniform(18.0, 35.0)
+    ln_sigma = 0.45         # spreads sizes continuously
+    params.update(dict(ext_th=ext_th, part_th=part_th, core_th=core_th,
+                       curve_prob=curve_prob, diag_prob=diag_prob,
+                       corridor_w=corridor_w, corridor_wall_th=corridor_wall_th,
+                       belt_offset=belt_offset, module_m=module_m,
+                       min_room_w_m=min_room_w_m, alpha=alpha, base_area_m2=base_area_m2,
+                       ln_sigma=ln_sigma))
 
     # ---- Footprint ----
     round_r = float(rng.uniform(0.0, 6.0) * px_per_m if rng.random() < 0.65 else 0.0)
@@ -312,63 +293,56 @@ def generate_floor_scene(width_m=200, height_m=100, px_per_m=4, seed=None):
         strokes.append(dict(kind="rect_border", layer="core", x0=int(rect[0]), y0=int(rect[1]), x1=int(rect[2]), y1=int(rect[3]), width_px=float(core_th)))
 
     # ---- Corridor ring ----
-    rx0 = int(2 + belt_offset)
-    ry0 = int(2 + belt_offset)
-    rx1 = int(W - 3 - belt_offset)
-    ry1 = int(H - 3 - belt_offset)
-
+    rx0 = int(2 + belt_offset); ry0 = int(2 + belt_offset)
+    rx1 = int(W - 3 - belt_offset); ry1 = int(H - 3 - belt_offset)
     if rx1 - rx0 > 40 and ry1 - ry0 > 40:
-        # Draw ring walls (thicker), then carve corridor void along centerline
         canvas.paint_rect_border(rx0, ry0, rx1, ry1, corridor_w + 2*corridor_wall_th, rounded_r_px=int(round_r * 0.6))
         strokes.append(dict(kind="rect_border", layer="corridor_wall", x0=rx0, y0=ry0, x1=rx1, y1=ry1,
                             width_px=float(corridor_w + 2*corridor_wall_th), rounded_r_px=int(round_r * 0.6)))
-
-        # Carve the corridor clear space
-        canvas.paint_rect_border(rx0, ry0, rx1, ry1, 0.0, rounded_r_px=0)  # metadata only (no-op wall)
         canvas.carve_polyline([(rx0, ry0), (rx1, ry0), (rx1, ry1), (rx0, ry1)], corridor_w, closed=True, mark_corridor=True)
         ops.append(dict(op="carve_corridor_ring", x0=rx0, y0=ry0, x1=rx1, y1=ry1, width_px=float(corridor_w), rounded_r_px=int(round_r * 0.6)))
 
     # ---- Corridor spines ----
     n_spines = int(rng.integers(1, 4))
-    spine_lines = []
     for _ in range(n_spines):
         if rng.random() < 0.6:
             x = int(rng.integers(int(W*0.25), int(W*0.75)))
-            # paint walls around the spine: (corridor_w + 2*wall_th)
             canvas._paint_segment((x, 3), (x, H-4), corridor_w + 2*corridor_wall_th, set_wall=True)
             strokes.append(dict(kind="segment", layer="corridor_wall", p0=(x, 3), p1=(x, H-4), width_px=float(corridor_w + 2*corridor_wall_th)))
-            # carve clear corridor
             canvas._paint_segment((x, 3), (x, H-4), corridor_w, set_wall=False, mark_corridor=True)
             ops.append(dict(op="carve_corridor_spine", p0=(x, 3), p1=(x, H-4), width_px=float(corridor_w)))
-            spine_lines.append(('segment', (x, 3), (x, H-4)))
         else:
             y = int(rng.integers(int(H*0.25), int(H*0.75)))
             canvas._paint_segment((3, y), (W-4, y), corridor_w + 2*corridor_wall_th, set_wall=True)
             strokes.append(dict(kind="segment", layer="corridor_wall", p0=(3, y), p1=(W-4, y), width_px=float(corridor_w + 2*corridor_wall_th)))
             canvas._paint_segment((3, y), (W-4, y), corridor_w, set_wall=False, mark_corridor=True)
             ops.append(dict(op="carve_corridor_spine", p0=(3, y), p1=(W-4, y), width_px=float(corridor_w)))
-            spine_lines.append(('segment', (3, y), (W-4, y)))
 
-    # Connect cores to ring
+    # Connect cores
     def nearest_point_on_ring(cx, cy):
         cands = [(cx, ry0), (cx, ry1), (rx0, cy), (rx1, cy)]
         d2 = [(cx - px)**2 + (cy - py)**2 for (px, py) in cands]
         return cands[int(np.argmin(d2))]
-
     for (x0, y0, x1, y1) in core_rects:
-        cx = (x0 + x1) // 2
-        cy = (y0 + y1) // 2
+        cx = (x0 + x1) // 2; cy = (y0 + y1) // 2
         tx, ty = nearest_point_on_ring(cx, cy)
         canvas._paint_segment((cx, cy), (tx, ty), corridor_w + 2*corridor_wall_th, set_wall=True)
         strokes.append(dict(kind="segment", layer="corridor_wall", p0=(int(cx), int(cy)), p1=(int(tx), int(ty)), width_px=float(corridor_w + 2*corridor_wall_th)))
         canvas._paint_segment((cx, cy), (tx, ty), corridor_w, set_wall=False, mark_corridor=True)
         ops.append(dict(op="carve_corridor_link", p0=(int(cx), int(cy)), p1=(int(tx), int(ty)), width_px=float(corridor_w)))
 
-    # ---- Partitioning with heavy-tailed target areas ----
-    inner_rect = (inset, inset, W - inset - 1, H - inset - 1)
-    stack = [inner_rect]
+    # ---- Partitioning with single heavy-tailed threshold per region ----
+    inner = (int(ext_th + px_per_m * 0.6), int(ext_th + px_per_m * 0.6),
+             W - int(ext_th + px_per_m * 0.6) - 1, H - int(ext_th + px_per_m * 0.6) - 1)
+    stack = [inner]
     splits_drawn = 0
-    max_splits = int(rng.integers(120, 220) if not big_room_mode else rng.integers(20, 90))
+    max_splits = int(rng.integers(140, 260))
+
+    def area_stop_threshold_px2():
+        # A_m2 ~ base * lognormal(0, ln_sigma) * (1 + Pareto(alpha))
+        ln_scale = math.exp(rng.normal(0.0, ln_sigma))
+        A_m2 = base_area_m2 * ln_scale * (1.0 + rng.pareto(alpha))
+        return A_m2 * (px_per_m ** 2)
 
     def draw_split(rect, vertical, s, curve=False, diag=False):
         x0, y0, x1, y1 = rect
@@ -405,25 +379,15 @@ def generate_floor_scene(width_m=200, height_m=100, px_per_m=4, seed=None):
                 canvas._paint_segment(p0, p1, part_th, set_wall=True)
                 strokes.append(dict(kind="segment", layer="partition", p0=(int(p0[0]), int(p0[1])), p1=(int(p1[0]), int(p1[1])), width_px=float(part_th)))
 
-    def area_stop_threshold():
-        # Pareto tail: A = base * (1 + X), X~Pareto(alpha); in px^2
-        X = rng.pareto(pareto_alpha)
-        A_m2 = base_area_m2 * (1.0 + X)
-        return A_m2 * (px_per_m ** 2)
-
     while stack and splits_drawn < max_splits:
-        # pick largest region first (like best-first BSP)
         areas = [ (r[2]-r[0])*(r[3]-r[1]) for r in stack ]
         idx = int(np.argmax(areas))
         x0, y0, x1, y1 = stack.pop(idx)
-        w = x1 - x0
-        h = y1 - y0
+        w = x1 - x0; h = y1 - y0
         if w < 2 * min_room_w or h < 2 * min_room_w:
             continue
-
-        # Heavy-tailed stopping: if current area below a sampled threshold, stop (leave big room)
         A = w * h
-        if A < area_stop_threshold():
+        if A < area_stop_threshold_px2():
             continue
 
         # choose split orientation
@@ -434,126 +398,95 @@ def generate_floor_scene(width_m=200, height_m=100, px_per_m=4, seed=None):
         else:
             vertical = rng.random() < 0.5
 
+        # edge-biased split position (continuous)
         if vertical:
-            smin = x0 + int(min_room_w)
-            smax = x1 - int(min_room_w)
-            if smax - smin < module_px * 0.5:
+            smin = x0 + int(min_room_w); smax = x1 - int(min_room_w)
+            if smax - smin < module_px * 0.5: 
                 continue
-            # skewed split: bias toward edges (more small rooms)
-            u = rng.beta(0.9, 2.2)
-            s = int(smin + u * (smax - smin))
-            s = int(rng.normal(s, module_px * 0.12))
-            s = int(np.clip(s, smin, smax))
-            draw_split((x0, y0, x1, y1), True, s, curve=(rng.random() < curve_prob), diag=(rng.random() < diag_prob))
-            stack.append((x0, y0, s, y1))
-            stack.append((s, y0, x1, y1))
+            u = 0.5 * rng.random() + 0.5 * rng.beta(0.65, 2.8)  # mix for continuity
+            s = int(np.clip(int(smin + u * (smax - smin)), smin, smax))
+            s = int(np.clip(int(rng.normal(s, module_px * 0.12)), smin, smax))
+            draw_split((x0, y0, x1, y1), True, s, curve=(rng.random()<curve_prob), diag=(rng.random()<diag_prob))
+            stack.append((x0, y0, s, y1)); stack.append((s, y0, x1, y1))
         else:
-            smin = y0 + int(min_room_w)
-            smax = y1 - int(min_room_w)
-            if smax - smin < module_px * 0.5:
+            smin = y0 + int(min_room_w); smax = y1 - int(min_room_w)
+            if smax - smin < module_px * 0.5: 
                 continue
-            u = rng.beta(0.9, 2.2)
-            s = int(smin + u * (smax - smin))
-            s = int(rng.normal(s, module_px * 0.12))
-            s = int(np.clip(s, smin, smax))
-            draw_split((x0, y0, x1, y1), False, s, curve=(rng.random() < curve_prob), diag=(rng.random() < diag_prob))
-            stack.append((x0, y0, x1, s))
-            stack.append((x0, s, x1, y1))
+            u = 0.5 * rng.random() + 0.5 * rng.beta(0.65, 2.8)
+            s = int(np.clip(int(smin + u * (smax - smin)), smin, smax))
+            s = int(np.clip(int(rng.normal(s, module_px * 0.12)), smin, smax))
+            draw_split((x0, y0, x1, y1), False, s, curve=(rng.random()<curve_prob), diag=(rng.random()<diag_prob))
+            stack.append((x0, y0, x1, s)); stack.append((x0, s, x1, y1))
         splits_drawn += 1
 
-    # Clean small artifacts
+    # Clean
     canvas.wall = closing(canvas.wall, r=1)
 
-    # ---- Place doors ----
-    # Base door width distribution (m): lognormal, then truncated, then limited by local wall length
+    # ---- Doors (same as before) ----
     def sample_door_width_m(local_wall_len_m):
-        # mean around 0.95m, sigma 0.18m, clamp to [0.7, min(2.0, 0.33*local_len)]
         w = float(np.exp(rng.normal(np.log(0.95), 0.18)))
         w = max(0.70, min(w, 2.00, 0.33 * local_wall_len_m))
         return w
 
-    # Helper: carve a "capsule" door opening centered at c, oriented by tangent t_hat, with clear width L, and radial depth R
     def carve_capsule(center_xy, t_hat, L_px, R_px):
         tx, ty = unit(t_hat[0], t_hat[1])
-        if tx == 0 and ty == 0:
-            return
+        if tx == 0 and ty == 0: return
         half = max(1.0, L_px / 2.0)
         p0 = (center_xy[0] - tx * half, center_xy[1] - ty * half)
         p1 = (center_xy[0] + tx * half, center_xy[1] + ty * half)
         canvas._paint_segment(p0, p1, 2*R_px, set_wall=False)
         ops.append(dict(op="carve_door_capsule", p0=(float(p0[0]), float(p0[1])), p1=(float(p1[0]), float(p1[1])), radius_px=float(R_px)))
 
-    # Strategy:
-    # 1) Seed random doors along corridor centerlines (more doors on longer segments).
-    # 2) Ensure almost every room is connected to a corridor by adding corrective doors.
-    # Corridor center approx: use canvas.corridor_mask as guide for positions; but we need tangents.
-    # We'll sample positions on corridor spines and ring using the ops we recorded.
+    # Seed doors: along corridor spines and ring
     def add_corridor_seed_doors():
-        # Build a list of centerline primitives from ops
         center_prims = []
         for o in ops:
-            if o['op'] in ('carve_corridor_spine', 'carve_corridor_link'):
+            if o.get('op') in ('carve_corridor_spine', 'carve_corridor_link'):
                 center_prims.append(('segment', o['p0'], o['p1']))
-            elif o['op'] == 'carve_corridor_ring':
-                # ring -> 4 segments rectangle
-                center_prims.append(('segment', (o['x0'], o['y0']), (o['x1'], o['y0'])))
-                center_prims.append(('segment', (o['x1'], o['y0']), (o['x1'], o['y1'])))
-                center_prims.append(('segment', (o['x1'], o['y1']), (o['x0'], o['y1'])))
-                center_prims.append(('segment', (o['x0'], o['y1']), (o['x0'], o['y0'])))
-
-        for prim in center_prims:
-            kind = prim[0]
-            if kind == 'segment':
-                p0, p1 = prim[1], prim[2]
-                L = line_length(p0, p1)
-                # expected spacing ~ 8-15 m
-                exp_spacing_px = rng.uniform(8.0, 15.0) * px_per_m
-                n_doors = max(1, int(L / exp_spacing_px))
-                for _ in range(n_doors):
-                    t = rng.random()
-                    cx = p0[0] + t * (p1[0] - p0[0])
-                    cy = p0[1] + t * (p1[1] - p0[1])
-                    # tangent and normal
-                    tx = (p1[0] - p0[0]); ty = (p1[1] - p0[1])
-                    txu, tyu = unit(tx, ty)
-                    nx, ny = -tyu, txu
-                    side = 1.0 if rng.random() < 0.5 else -1.0
-                    # move to wall center (one side)
-                    door_center = (cx + side * nx * (corridor_w/2 + corridor_wall_th*0.75),
-                                   cy + side * ny * (corridor_w/2 + corridor_wall_th*0.75))
-                    local_len_m = (L / px_per_m)
-                    clear_m = sample_door_width_m(local_len_m)
-                    carve_capsule(door_center, (txu, tyu), L_px=clear_m*px_per_m, R_px=corridor_wall_th*0.7 + 1.5)
-                    doors.append(dict(center=(float(door_center[0]), float(door_center[1])),
-                                      tangent=(float(txu), float(tyu)), normal=(float(nx), float(ny)),
-                                      clear_width_m=float(clear_m), side=int(np.sign(side)),
-                                      source="seed_corridor"))
-            # (Bezier corridors aren't used here; ring+spines are segments.)
+        for s in strokes:
+            if s.get('kind') == 'rect_border' and s.get('layer') == 'corridor_wall':
+                x0, y0, x1, y1 = s['x0'], s['y0'], s['x1'], s['y1']
+                center_prims += [
+                    ('segment', (x0, y0), (x1, y0)),
+                    ('segment', (x1, y0), (x1, y1)),
+                    ('segment', (x1, y1), (x0, y1)),
+                    ('segment', (x0, y1), (x0, y0)),
+                ]
+                break
+        for kind, p0, p1 in center_prims:
+            L = line_length(p0, p1)
+            exp_spacing_px = (np.random.uniform(8.0, 15.0) * px_per_m)
+            n_doors = max(1, int(L / exp_spacing_px))
+            for _ in range(n_doors):
+                t = np.random.random()
+                cx = p0[0] + t * (p1[0] - p0[0])
+                cy = p0[1] + t * (p1[1] - p0[1])
+                tx = (p1[0] - p0[0]); ty = (p1[1] - p0[1])
+                txu, tyu = unit(tx, ty)
+                nx, ny = -tyu, txu
+                side = 1.0 if np.random.random() < 0.5 else -1.0
+                door_center = (cx + side * nx * (corridor_w/2 + corridor_wall_th*0.75),
+                               cy + side * ny * (corridor_w/2 + corridor_wall_th*0.75))
+                local_len_m = (L / px_per_m)
+                clear_m = sample_door_width_m(local_len_m)
+                carve_capsule(door_center, (txu, tyu), L_px=clear_m*px_per_m, R_px=corridor_wall_th*0.7 + 1.5)
 
     add_corridor_seed_doors()
 
-    # After seeding, ensure connectivity: add a door for almost every room not connected to a corridor.
+    # Ensure most rooms have at least one door
     def ensure_room_doors():
         space = ~canvas.wall
         labels, sizes = connected_components(space)
         corridor_ids = set(np.unique(labels[canvas.corridor_mask])); corridor_ids.discard(-1)
-        if not corridor_ids:
-            return
-        corridor_ids = set(list(corridor_ids))
+        if not corridor_ids: return
         H, W = space.shape
-        # For each component not in corridor_ids, try to place a door on boundary touching a corridor across a wall.
         all_ids = set(np.unique(labels)); all_ids.discard(-1)
         room_ids = [cid for cid in all_ids if cid not in corridor_ids]
-        rng.shuffle(room_ids)
-
+        np.random.shuffle(room_ids)
         for cid in room_ids:
-            # probability to allow a rare doorless room
-            if rng.random() < 0.03:
+            if np.random.random() < 0.03:  # rare doorless
                 continue
-
-            # Find perimeter of this room
             mask_room = labels == cid
-            # boundary pixels of room (dilation minus mask)
             bd = np.zeros_like(mask_room, dtype=bool)
             for dy in (-1,0,1):
                 for dx in (-1,0,1):
@@ -563,9 +496,7 @@ def generate_floor_scene(width_m=200, height_m=100, px_per_m=4, seed=None):
                     xs = slice(max(0, dx), W + min(0, dx))
                     xd = slice(max(0, -dx), W + min(0, -dx))
                     bd[yd, xd] |= mask_room[ys, xs]
-            bd &= ~mask_room  # strip interior
-
-            # candidate wall pixels between room and corridor: wall AND adjacent to room and corridor
+            bd &= ~mask_room
             near_room = bd
             near_corr = np.zeros_like(mask_room, dtype=bool)
             for dy,dx in ((1,0),(-1,0),(0,1),(0,-1)):
@@ -577,26 +508,21 @@ def generate_floor_scene(width_m=200, height_m=100, px_per_m=4, seed=None):
             candidate = canvas.wall & near_room & near_corr
             ys, xs = np.where(candidate)
             if len(xs) == 0:
-                # fallback: pick any wall pixel adjacent to the room
                 candidate = canvas.wall & near_room
                 ys, xs = np.where(candidate)
-                if len(xs) == 0:
-                    continue
-
-            k = int(rng.integers(0, len(xs)))
+                if len(xs) == 0: continue
+            k = int(np.random.randint(0, len(xs)))
             x = xs[k]; y = ys[k]
             nx = float(canvas.nx[y, x]); ny = float(canvas.ny[y, x])
-            # tangent is perpendicular to normal
             tx, ty = -ny, nx
-            # estimate local wall length by walking along tangent until normal changes a lot
             L_count = 0
-            max_walk = int(12 * px_per_m)  # up to ~12 m
+            max_walk = int(12 * px_per_m)
             for s in range(1, max_walk):
                 xi = int(round(x + tx*s)); yi = int(round(y + ty*s))
                 if not (0 <= xi < W and 0 <= yi < H): break
                 if not canvas.wall[yi, xi]: break
                 nxd = canvas.nx[yi, xi]; nyd = canvas.ny[yi, xi]
-                if nxd*nx + nyd*ny < 0.94: break  # angle dev > ~20 deg
+                if nxd*nx + nyd*ny < 0.94: break
                 L_count += 1
             for s in range(1, max_walk):
                 xi = int(round(x - tx*s)); yi = int(round(y - ty*s))
@@ -607,97 +533,59 @@ def generate_floor_scene(width_m=200, height_m=100, px_per_m=4, seed=None):
                 L_count += 1
             local_len_px = max(4, L_count)
             clear_m = sample_door_width_m(local_len_px / px_per_m)
-            carve_capsule((x, y), (tx, ty), L_px=clear_m*px_per_m, R_px=corridor_wall_th*0.7 + 1.5)
-            doors.append(dict(center=(float(x), float(y)),
-                              tangent=(float(tx), float(ty)), normal=(float(nx), float(ny)),
-                              clear_width_m=float(clear_m), side=0, source="connectivity_fix"))
+            half = max(1.0, (clear_m*px_per_m)/2.0)
+            p0 = (x - tx*half, y - ty*half)
+            p1 = (x + tx*half, y + ty*half)
+            canvas._paint_segment(p0, p1, 2*(corridor_wall_th*0.7 + 1.5), set_wall=False)
 
     ensure_room_doors()
 
-    # Final morphological clean to remove tiny artifacts after carving
     canvas.wall = closing(canvas.wall, r=1)
-    # Zero normals where there is no wall
     canvas.nx[~canvas.wall] = 0.0
     canvas.ny[~canvas.wall] = 0.0
 
-    # ---- Pack metadata ----
     scene = dict(
-        version=2,
+        version=4,
         seed=int(seed),
         canvas=dict(width_m=float(width_m), height_m=float(height_m), px_per_m=float(px_per_m),
                     W=int(W), H=int(H)),
         params=params,
-        strokes=strokes,  # paint ops (walls)
-        ops=ops,          # carve ops (corridors, doors)
-        doors=doors       # explicit door list (redundant info but convenient)
+        strokes=strokes,
+        ops=ops
     )
-
-    return canvas.wall, np.stack([canvas.nx, canvas.ny], axis=-1).astype(np.float32), scene
+    normals = np.stack([canvas.nx, canvas.ny], axis=-1).astype(np.float32)
+    return canvas.wall, normals, scene
 
 # ---------------- UI + save ----------------
 
-def save_artifacts(mask, normals, scene, prefix="/Users/xoren/icassp2025/generated_rooms/"):
+def save_artifacts(mask, normals, scene, prefix="/Users/xoren/icassp2025/generated_rooms/floorplan"):
     np.save(prefix + "_mask.npy", mask.astype(np.uint8))
     np.save(prefix + "_normals.npy", normals.astype(np.float32))
     with open(prefix + ".json", "w") as f:
         json.dump(scene, f, indent=2)
 
-def visualize(mask):
-    fig = plt.figure(figsize=(10, 5))
-    ax = plt.gca()
-    ax.imshow(mask, cmap="gray_r", interpolation="nearest")
+def draw_mask(ax, mask):
+    ax.clear()
+    ax.imshow(mask, interpolation="nearest")  # default colormap
     ax.set_title("Wall mask (1=wall)")
     ax.set_axis_off()
-    plt.show()
-
-def run_once_and_show():
-    mask, normals, scene = generate_floor_scene()
-    save_artifacts(mask, normals, scene)
-    visualize(mask)
-
-def _show_with_mpl_button():
-    # Initial render and button inside the Matplotlib window (works outside notebooks)
-    mask, normals, scene = generate_floor_scene()
-    save_artifacts(mask, normals, scene)
-
-    fig, ax = plt.subplots(figsize=(10, 5))
-    plt.subplots_adjust(bottom=0.15)
-    im = ax.imshow(mask, cmap="gray_r", interpolation="nearest")
-    ax.set_title("Wall mask (1=wall)")
-    ax.set_axis_off()
-
-    ax_btn = fig.add_axes([0.42, 0.03, 0.16, 0.07])
-    btn = MplButton(ax_btn, 'New floor')
-
-    def on_click(_):
-        new_mask, new_normals, new_scene = generate_floor_scene()
-        save_artifacts(new_mask, new_normals, new_scene)
-        im.set_data(new_mask)
-        ax.set_xlim(0, new_mask.shape[1] - 1)
-        ax.set_ylim(new_mask.shape[0] - 1, 0)
-        fig.canvas.draw_idle()
-
-    btn.on_clicked(on_click)
-    plt.show()
 
 def show_generator():
-    if _HAS_WIDGETS and _in_notebook():
-        btn = widgets.Button(description="New floor", button_style="primary")
-        out = widgets.Output()
-
-        def on_click(_):
-            with out:
-                out.clear_output(wait=True)
-                mask, normals, scene = generate_floor_scene()
-                save_artifacts(mask, normals, scene)
-                visualize(mask)
-
-        btn.on_click(on_click)
-        display(btn, out)
-        # initial render & save
-        on_click(None)
-    else:
-        # Fallback to Matplotlib-native button when not in a notebook
-        _show_with_mpl_button()
+    mask, normals, scene = generate_floor_scene()
+    save_artifacts(mask, normals, scene)
+    fig, ax = plt.subplots(figsize=(10, 5))
+    draw_mask(ax, mask)
+    # Button (Matplotlib)
+    from matplotlib.widgets import Button
+    plt.subplots_adjust(bottom=0.16)
+    bax = plt.axes([0.42, 0.04, 0.16, 0.08])
+    btn = Button(bax, "New floor")
+    def on_click(event):
+        m, n, s = generate_floor_scene()
+        save_artifacts(m, n, s)
+        draw_mask(ax, m)
+        fig.canvas.draw_idle()
+    btn.on_clicked(on_click)
+    plt.show()
 
 show_generator()
