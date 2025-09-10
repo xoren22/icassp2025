@@ -4,7 +4,7 @@
 # - Enforces realistic minimum room width (rare very small rooms)
 # - Records full metadata for reproducibility (strokes + carve ops + doors) to JSON
 # - Computes per-pixel wall normals (H x W x 2 float32)
-# - UI: one "New floor" button regenerates; the current plan is saved to /mnt/data/*
+# - UI: one "New floor" button regenerates; the current plan is saved to /Users/xoren/icassp2025/generated_rooms/*
 
 import json
 import math
@@ -13,6 +13,7 @@ from typing import List, Tuple, Dict, Any, Optional
 
 import numpy as np
 import matplotlib.pyplot as plt
+from matplotlib.widgets import Button as MplButton
 
 try:
     import ipywidgets as widgets
@@ -20,6 +21,14 @@ try:
     _HAS_WIDGETS = True
 except Exception:
     _HAS_WIDGETS = False
+
+def _in_notebook():
+    try:
+        from IPython import get_ipython
+        shell = get_ipython().__class__.__name__
+        return shell == 'ZMQInteractiveShell'
+    except Exception:
+        return False
 
 # ---------------- Raster canvas with normals ----------------
 
@@ -646,8 +655,33 @@ def run_once_and_show():
     save_artifacts(mask, normals, scene)
     visualize(mask)
 
+def _show_with_mpl_button():
+    # Initial render and button inside the Matplotlib window (works outside notebooks)
+    mask, normals, scene = generate_floor_scene()
+    save_artifacts(mask, normals, scene)
+
+    fig, ax = plt.subplots(figsize=(10, 5))
+    plt.subplots_adjust(bottom=0.15)
+    im = ax.imshow(mask, cmap="gray_r", interpolation="nearest")
+    ax.set_title("Wall mask (1=wall)")
+    ax.set_axis_off()
+
+    ax_btn = fig.add_axes([0.42, 0.03, 0.16, 0.07])
+    btn = MplButton(ax_btn, 'New floor')
+
+    def on_click(_):
+        new_mask, new_normals, new_scene = generate_floor_scene()
+        save_artifacts(new_mask, new_normals, new_scene)
+        im.set_data(new_mask)
+        ax.set_xlim(0, new_mask.shape[1] - 1)
+        ax.set_ylim(new_mask.shape[0] - 1, 0)
+        fig.canvas.draw_idle()
+
+    btn.on_clicked(on_click)
+    plt.show()
+
 def show_generator():
-    if _HAS_WIDGETS:
+    if _HAS_WIDGETS and _in_notebook():
         btn = widgets.Button(description="New floor", button_style="primary")
         out = widgets.Output()
 
@@ -663,7 +697,7 @@ def show_generator():
         # initial render & save
         on_click(None)
     else:
-        # Fallback single render
-        run_once_and_show()
+        # Fallback to Matplotlib-native button when not in a notebook
+        _show_with_mpl_button()
 
 show_generator()
