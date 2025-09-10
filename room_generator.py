@@ -3,28 +3,13 @@
 # - Includes straight and curved walls, realistic thickness variation, and corridors
 # - A "New floor" button regenerates a different plan on each click
 #
-# Dependencies: numpy, matplotlib, ipywidgets (all standard in Jupyter). No internet access required.
+# Dependencies: numpy, matplotlib. No internet access required.
 
 import numpy as np
 import matplotlib.pyplot as plt
+from matplotlib.widgets import Button
 
-# Try to import ipywidgets; fall back to a Matplotlib button if unavailable.
-try:
-    import ipywidgets as widgets
-    from IPython.display import display, clear_output
-    _HAS_WIDGETS = True
-except Exception:
-    from matplotlib.widgets import Button
-    _HAS_WIDGETS = False
-
-# Detect if we're running inside a Jupyter environment (with an active kernel).
-def _in_jupyter():
-    try:
-        from IPython import get_ipython
-        ip = get_ipython()
-        return ip is not None and hasattr(ip, "kernel")
-    except Exception:
-        return False
+# Jupyter-specific logic removed; this script assumes a standard Python environment.
 
 # ---------- Geometry helpers (raster) ----------
 
@@ -378,54 +363,26 @@ def generate_floor_mask(
 
 def show_generator():
     width_m, height_m, ppm = 200, 100, 4  # 0.25 m/px -> 800x400
-    # Only use ipywidgets when we're actually in a Jupyter notebook
-    if _HAS_WIDGETS and _in_jupyter():
-        btn = widgets.Button(description="New floor", button_style="primary", tooltip="Generate a new random wall mask")
-        out = widgets.Output()
+    mask = generate_floor_mask(width_m, height_m, ppm)
+    fig, ax = plt.subplots(figsize=(10,5))
+    # Place controls at the top so they're not obscured by the toolbar
+    plt.subplots_adjust(top=0.88, bottom=0.06)
+    im = ax.imshow(mask, cmap="gray_r", interpolation="nearest")
+    ax.set_axis_off()
+    ax.set_title("Wall mask (1=wall)")
 
-        def on_click(_):
-            with out:
-                out.clear_output(wait=True)
-                mask = generate_floor_mask(width_m, height_m, ppm)
-                fig = plt.figure(figsize=(10, 5))
-                ax = plt.gca()
-                ax.imshow(mask, cmap="gray_r", interpolation="nearest")
-                ax.set_title("Wall mask (1=wall)")
-                ax.set_axis_off()
-                plt.show()
+    # Button at the top center
+    ax_btn = plt.axes([0.40, 0.91, 0.20, 0.06])
+    button = Button(ax_btn, "New floor")
 
-        btn.on_click(on_click)
+    def regenerate(_=None):
+        im.set_data(generate_floor_mask(width_m, height_m, ppm))
+        fig.canvas.draw_idle()
 
-        display(btn, out)
-        # initial render
-        on_click(None)
-    else:
-        # Fallback: Matplotlib button inside the figure (less reliable in some Jupyter setups)
-        # Ensure Button is available even if ipywidgets import succeeded.
-        try:
-            from matplotlib.widgets import Button  # type: ignore
-        except Exception:
-            pass
-        mask = generate_floor_mask(width_m, height_m, ppm)
-        fig, ax = plt.subplots(figsize=(10,5))
-        # Place controls at the top so they're not obscured by the toolbar
-        plt.subplots_adjust(top=0.88, bottom=0.06)
-        im = ax.imshow(mask, cmap="gray_r", interpolation="nearest")
-        ax.set_axis_off()
-        ax.set_title("Wall mask (1=wall)")
-
-        # Button at the top center
-        ax_btn = plt.axes([0.40, 0.91, 0.20, 0.06])
-        button = Button(ax_btn, "New floor")
-
-        def regenerate(_=None):
-            im.set_data(generate_floor_mask(width_m, height_m, ppm))
-            fig.canvas.draw_idle()
-
-        button.on_clicked(regenerate)
-        # Convenience: keyboard/mouse shortcuts to regenerate
-        fig.canvas.mpl_connect("key_press_event", lambda e: regenerate() if e.key in ("r", " ", "enter") else None)
-        fig.canvas.mpl_connect("button_press_event", lambda e: regenerate() if e.button == 1 else None)
-        plt.show()
+    button.on_clicked(regenerate)
+    # Convenience: keyboard/mouse shortcuts to regenerate
+    fig.canvas.mpl_connect("key_press_event", lambda e: regenerate() if e.key in ("r", " ", "enter") else None)
+    fig.canvas.mpl_connect("button_press_event", lambda e: regenerate() if e.button == 1 else None)
+    plt.show()
 
 show_generator()
