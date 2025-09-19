@@ -214,10 +214,52 @@ def unit(vx, vy):
 
 # ---------------- Generator + metadata ----------------
 
-def generate_floor_scene(width_m=200, height_m=100, px_per_m=4, seed=None):
+def sample_canvas_size(seed: int) -> tuple:
+    """
+    Return (width_m, height_m) for the canvas, sampled from embedded ranges.
+
+    - height_m: sampled from a reasonable range for floor-plate extents
+      using a log-normal-ish shape and clamped.
+    - aspect_ratio: sampled to prefer moderate rectangles (width >= height).
+    - width_m = height_m * aspect_ratio
+
+    This function is deterministic for a given seed.
+    """
+    # Embedded ranges (tweakable here only)
+    MIN_AR, MAX_AR = 0.4, 2.5
+    MIN_H_M, MAX_H_M = 70.0, 160.0
+
+    rng = np.random.default_rng(int(seed) + 911_531)
+
+    # Height: log-normal-like around ~110 m, then clamp
+    base = rng.normal(loc=math.log(110.0), scale=0.18)
+    height_m = float(np.clip(math.exp(base), MIN_H_M, MAX_H_M))
+
+    # Aspect ratio: mix to bias towards ~2 while allowing tails
+    mix = rng.random()
+    if mix < 0.55:
+        ar = float(rng.normal(loc=2.0, scale=0.35))
+    elif mix < 0.85:
+        # Beta mapped to [MIN_AR, MAX_AR]
+        u = float(rng.beta(2.2, 2.0))
+        ar = MIN_AR + u * (MAX_AR - MIN_AR)
+    else:
+        ar = float(rng.uniform(MIN_AR, MAX_AR))
+    aspect_ratio = float(np.clip(ar, MIN_AR, MAX_AR))
+
+    width_m = float(height_m * aspect_ratio)
+    return width_m, height_m
+
+def generate_floor_scene(width_m=None, height_m=None, px_per_m=4, seed=None):
     if seed is None:
         seed = int(np.random.SeedSequence().entropy)
     rng = np.random.default_rng(seed)
+
+    # If size unspecified, sample from modular distribution
+    if width_m is None or height_m is None:
+        w_m_s, h_m_s = sample_canvas_size(seed)
+        width_m = float(w_m_s if width_m is None else width_m)
+        height_m = float(h_m_s if height_m is None else height_m)
 
     W = int(round(width_m * px_per_m))
     H = int(round(height_m * px_per_m))
@@ -324,7 +366,10 @@ def generate_floor_scene(width_m=200, height_m=100, px_per_m=4, seed=None):
              W - int(ext_th + px_per_m * 0.6) - 1, H - int(ext_th + px_per_m * 0.6) - 1)
     stack = [inner]
     splits_drawn = 0
-    max_splits = int(rng.integers(35, 75))
+    # Scale partition budget with canvas area to keep density roughly stable
+    A_px = float(W * H)
+    splits_density = 1.5e-4  # ~48 splits for 800x400 canvas
+    max_splits = int(np.clip(splits_density * A_px, 35, 150))
 
     # Spatial bias map: encourages larger rooms in some areas and smaller in others
     gh = max(3, int(round(H / max(1, int(40 * px_per_m)))))
@@ -558,14 +603,65 @@ def generate_floor_scene(width_m=200, height_m=100, px_per_m=4, seed=None):
         ops=ops
     )
     normals = np.stack([canvas.nx, canvas.ny], axis=-1).astype(np.float32)
-    return canvas.wall, normals, scene
+
+    # ---- Reflectance and transmittance maps (for wall pixels) ----
+    wall_mask = canvas.wall
+    reflectance = np.zeros_like(wall_mask, dtype=np.float32)
+    transmittance = np.zeros_like(wall_mask, dtype=np.float32)
+    if np.any(wall_mask):
+        base_reflect = float(rng.uniform(1.0, 15.0))
+        base_trans = float(rng.uniform(1.0, 15.0))
+        reflectance[wall_mask] = base_reflect
+        transmittance[wall_mask] = base_trans
+
+        # Create low-frequency patches to simulate windows/thin parts with lower transmittance loss
+        Hm, Wm = wall_mask.shape
+        gh = max(1, Hm // 32)
+        gw = max(1, Wm // 32)
+        noise_grid = rng.random((gh, gw)).astype(np.float32)
+        up_h = (Hm + gh - 1) // gh
+        up_w = (Wm + gw - 1) // gw
+        noise = np.kron(noise_grid, np.ones((up_h, up_w), dtype=np.float32))[:Hm, :Wm]
+        for _ in range(2):
+            noise = (np.roll(noise, 1, axis=1) + noise + np.roll(noise, -1, axis=1)) / 3.0
+            noise = (np.roll(noise, 1, axis=0) + noise + np.roll(noise, -1, axis=0)) / 3.0
+        windows_mask = (noise > 0.85) & wall_mask
+        if np.any(windows_mask):
+            # Slightly expand patches
+            wm = windows_mask.copy()
+            for dy, dx in ((1,0),(-1,0),(0,1),(0,-1)):
+                ys = slice(max(0, dy), Hm + min(0, dy))
+                yd = slice(max(0, -dy), Hm + min(0, -dy))
+                xs = slice(max(0, dx), Wm + min(0, dx))
+                xd = slice(max(0, -dx), Wm + min(0, -dx))
+                wm[yd, xd] |= windows_mask[ys, xs]
+            red_factor = float(rng.uniform(0.3, 0.7))
+            trans_val = float(np.clip(base_trans * red_factor, 1.0, 15.0))
+            transmittance[wm] = trans_val
+            # Optionally slightly adjust reflectance near windows
+            rf_factor = float(rng.uniform(0.85, 1.0))
+            refl_val = float(np.clip(base_reflect * rf_factor, 1.0, 15.0))
+            reflectance[wm] = refl_val
+
+    return canvas.wall, normals, scene, reflectance, transmittance
 
 # ---------------- UI + save ----------------
 
-def save_artifacts(mask, normals, scene, prefix="/Users/xoren/icassp2025/generated_rooms/floorplan"):
-    os.makedirs(os.path.dirname(prefix), exist_ok=True)
+def _gen_id(scene: Dict[str, Any]) -> str:
+    seed = int(scene.get("seed", 0))
+    c = scene.get("canvas", {})
+    w_m = float(c.get("width_m", 0.0))
+    h_m = float(c.get("height_m", 0.0))
+    return f"seed{seed}_w{int(round(w_m))}m_h{int(round(h_m))}m"
+
+def save_artifacts(mask, normals, scene, reflectance, transmittance, prefix_dir="/Users/xoren/icassp2025/generated_rooms"):
+    os.makedirs(prefix_dir, exist_ok=True)
+    gen_id = _gen_id(scene)
+    prefix = os.path.join(prefix_dir, gen_id)
     np.save(prefix + "_mask.npy", mask.astype(np.uint8))
     np.save(prefix + "_normals.npy", normals.astype(np.float32))
+    np.save(prefix + "_reflectance.npy", reflectance.astype(np.float32))
+    np.save(prefix + "_transmittance.npy", transmittance.astype(np.float32))
     with open(prefix + ".json", "w") as f:
         json.dump(scene, f, indent=2)
 
@@ -575,21 +671,66 @@ def draw_mask(ax, mask):
     ax.set_title("Wall mask (1=wall)")
     ax.set_axis_off()
 
+def draw_overview(fig, axes, mask, reflectance, transmittance):
+    ax_mask, ax_refl, ax_trans = axes
+    # Mask panel
+    ax_mask.clear(); ax_mask.set_axis_off()
+    ax_mask.imshow(mask, cmap="gray", interpolation="nearest")
+    ax_mask.set_title("Wall mask")
+
+    # Reflectance panel (mask non-walls)
+    ax_refl.clear(); ax_refl.set_axis_off()
+    refl_vis = np.ma.masked_where(~mask, reflectance)
+    im_refl = ax_refl.imshow(refl_vis, cmap="magma", vmin=1.0, vmax=15.0, interpolation="nearest")
+    ax_refl.set_title("Reflectance (1–15)")
+    fig.colorbar(im_refl, ax=ax_refl, fraction=0.046, pad=0.04)
+
+    # Transmittance panel (mask non-walls)
+    ax_trans.clear(); ax_trans.set_axis_off()
+    trans_vis = np.ma.masked_where(~mask, transmittance)
+    im_trans = ax_trans.imshow(trans_vis, cmap="viridis", vmin=1.0, vmax=15.0, interpolation="nearest")
+    ax_trans.set_title("Transmittance (1–15)")
+    fig.colorbar(im_trans, ax=ax_trans, fraction=0.046, pad=0.04)
+
 def show_generator():
-    mask, normals, scene = generate_floor_scene()
-    save_artifacts(mask, normals, scene)
-    fig, ax = plt.subplots(figsize=(10, 5))
-    draw_mask(ax, mask)
+    # Initial generation and save
+    mask, normals, scene, refl, trans = generate_floor_scene()
+    save_artifacts(mask, normals, scene, refl, trans)
+
+    # Create figure with three panels once
+    fig, axes = plt.subplots(1, 3, figsize=(18, 6))
+    for ax in axes:
+        ax.set_axis_off()
+
+    # Mask panel
+    axes[0].set_title("Wall mask")
+    im_mask = axes[0].imshow(mask, cmap="gray", interpolation="nearest")
+
+    # Reflectance panel
+    axes[1].set_title("Reflectance (1–15)")
+    im_refl = axes[1].imshow(np.ma.masked_where(~mask, refl), cmap="magma", vmin=1.0, vmax=15.0, interpolation="nearest")
+    cbar_refl = fig.colorbar(im_refl, ax=axes[1], fraction=0.046, pad=0.04)
+
+    # Transmittance panel
+    axes[2].set_title("Transmittance (1–15)")
+    im_trans = axes[2].imshow(np.ma.masked_where(~mask, trans), cmap="viridis", vmin=1.0, vmax=15.0, interpolation="nearest")
+    cbar_trans = fig.colorbar(im_trans, ax=axes[2], fraction=0.046, pad=0.04)
+
     # Button (Matplotlib)
     from matplotlib.widgets import Button
     plt.subplots_adjust(bottom=0.16)
-    bax = plt.axes([0.42, 0.04, 0.16, 0.08])
+    bax = plt.axes([0.44, 0.04, 0.16, 0.08])
     btn = Button(bax, "New floor")
+
     def on_click(event):
-        m, n, s = generate_floor_scene()
-        save_artifacts(m, n, s)
-        draw_mask(ax, m)
+        # Generate a new layout and update images without creating new artists
+        m, n, s, r, t = generate_floor_scene()
+        save_artifacts(m, n, s, r, t)
+        im_mask.set_data(m)
+        im_refl.set_data(np.ma.masked_where(~m, r))
+        im_trans.set_data(np.ma.masked_where(~m, t))
         fig.canvas.draw_idle()
+
     btn.on_clicked(on_click)
     plt.show()
 
@@ -598,7 +739,7 @@ show_generator()
 # ---------------- Self-tests (gated by RG_TESTS=1) ----------------
 if os.environ.get("RG_TESTS", "0") == "1":
     # Deterministic seed for repeatability
-    mask, normals, scene = generate_floor_scene(seed=1234)
+    mask, normals, scene, refl, trans = generate_floor_scene(seed=1234)
 
     # Shapes and dtypes
     assert mask.dtype == np.bool_, "mask must be boolean"
@@ -619,6 +760,8 @@ if os.environ.get("RG_TESTS", "0") == "1":
     mag = np.linalg.norm(normals, axis=-1)
     mag_wall_nz = mag[wall_nz]
     assert np.isfinite(mag_wall_nz).all(), "wall normal magnitudes must be finite"
+    avg_mag_wall_nz = float(mag_wall_nz.mean()) if mag_wall_nz.size > 0 else float("nan")
+    q05 = q95 = None
     if mag_wall_nz.size > 0:
         q05 = float(np.quantile(mag_wall_nz, 0.05))
         q95 = float(np.quantile(mag_wall_nz, 0.95))
@@ -645,6 +788,7 @@ if os.environ.get("RG_TESTS", "0") == "1":
             dots = np.sum(v1 * v2, axis=-1)
             aligned += int(np.sum(dots > 0.2))
             total_pairs += int(dots.size)
+    frac_aligned = float("nan")
     if total_pairs > 0:
         frac_aligned = aligned / total_pairs
         assert frac_aligned >= 0.25, f"insufficient neighbor alignment: {frac_aligned:.3f} (< 0.25)"
@@ -653,3 +797,43 @@ if os.environ.get("RG_TESTS", "0") == "1":
     assert scene["canvas"]["W"] == W and scene["canvas"]["H"] == H
     assert isinstance(scene.get("strokes"), list) and isinstance(scene.get("ops"), list)
     assert scene.get("version") == 4
+
+    # Sampler determinism and ranges
+    w1, h1 = sample_canvas_size(1234)
+    w2, h2 = sample_canvas_size(1234)
+    assert (w1, h1) == (w2, h2), "sample_canvas_size must be deterministic for a given seed"
+    assert 70.0 <= h1 <= 160.0 and 70.0 <= h2 <= 160.0, "height out of embedded range"
+    ar = w1 / max(1e-6, h1)
+    assert 0.4 <= ar <= 2.5, "aspect ratio out of embedded range"
+
+    # Save ID format check
+    gen_id = _gen_id(scene)
+    assert str(scene["seed"]) in gen_id and "w" in gen_id and "h" in gen_id, "gen id format unexpected"
+
+    # Reflectance/transmittance sanity
+    assert refl.shape == mask.shape and trans.shape == mask.shape
+    assert refl.dtype == np.float32 and trans.dtype == np.float32
+    # Non-walls must be zero in refl/trans
+    assert np.all(refl[~mask] == 0.0) and np.all(trans[~mask] == 0.0)
+    if np.any(mask):
+        # Walls within specified ranges
+        rmin, rmax = float(np.min(refl[mask])), float(np.max(refl[mask]))
+        tmin, tmax = float(np.min(trans[mask])), float(np.max(trans[mask]))
+        assert 1.0 <= rmin <= 15.0 and 1.0 <= rmax <= 15.0
+        assert 1.0 <= tmin <= 15.0 and 1.0 <= tmax <= 15.0
+
+    # If all assertions passed, print a concise success summary with key values
+    print("[RG_TESTS] All tests passed.")
+    if q05 is not None and q95 is not None:
+        print(f"[RG_TESTS] Wall normal magnitudes: mean={avg_mag_wall_nz:.3f}, 5th={q05:.3f}, 95th={q95:.3f} (expected ~[0.75, 1.05]).")
+    print(f"[RG_TESTS] Wall normal coverage: {coverage:.2%} (>= 10%).")
+    if not math.isnan(frac_aligned):
+        print(f"[RG_TESTS] Neighbor alignment: {frac_aligned:.2%} of adjacent pairs aligned (>= 25%).")
+    print(f"[RG_TESTS] Sampler: height={h1:.1f} m within [70, 160], aspect_ratio={ar:.2f} within [0.4, 2.5].")
+    # Reflectance/transmittance summary
+    if np.any(mask):
+        rmin, rmax = float(np.min(refl[mask])), float(np.max(refl[mask]))
+        tmin, tmax = float(np.min(trans[mask])), float(np.max(trans[mask]))
+        print(f"[RG_TESTS] Reflectance range on walls: [{rmin:.2f}, {rmax:.2f}] within [1, 15].")
+        print(f"[RG_TESTS] Transmittance range on walls: [{tmin:.2f}, {tmax:.2f}] within [1, 15].")
+    print(f"[RG_TESTS] Save ID: {gen_id}")
