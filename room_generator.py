@@ -4,18 +4,11 @@
 #
 # Keeps: minimum room width logic, doors, normals, metadata, "New floor" button.
 
-import json, math
+import json, math, os
 from dataclasses import dataclass, field
-from typing import List, Dict, Any, Tuple
+from typing import List, Dict, Any
 import numpy as np
 import matplotlib.pyplot as plt
-
-try:
-    import ipywidgets as widgets
-    from IPython.display import display, clear_output
-    _HAS_WIDGETS = True
-except Exception:
-    _HAS_WIDGETS = False
 
 # ---------------- Raster canvas with normals ----------------
 
@@ -73,11 +66,12 @@ class RasterCanvas:
         inside = d2 <= (r*r)
 
         if set_wall:
-            closer = inside & (np.sqrt(d2, dtype=np.float32) < self.d[ymin:ymax+1, xmin:xmax+1])
+            sqrt_d2 = np.sqrt(d2, dtype=np.float32)
+            closer = inside & (sqrt_d2 < self.d[ymin:ymax+1, xmin:xmax+1])
             if np.any(closer):
                 self.wall[ymin:ymax+1, xmin:xmax+1][inside] = True
-                self.d[ymin:ymax+1, xmin:xmax+1][closer] = np.sqrt(d2[closer]).astype(np.float32)
-                nrm = np.sqrt(vx[closer]*vx[closer] + vy[closer]*vy[closer]).astype(np.float32)
+                self.d[ymin:ymax+1, xmin:xmax+1][closer] = sqrt_d2[closer].astype(np.float32)
+                nrm = sqrt_d2[closer]
                 nz = nrm > 1e-6
                 nx_new = np.zeros_like(nrm, dtype=np.float32)
                 ny_new = np.zeros_like(nrm, dtype=np.float32)
@@ -114,24 +108,18 @@ class RasterCanvas:
         self.paint_polyline(pts, width_px, closed=False, mark_corridor=mark_corridor)
 
     def paint_rect_border(self, x0, y0, x1, y1, width_px, rounded_r_px=0, samples_per_quadrant=24, mark_corridor=False):
-        # Ensure ordering
+        # Ensure proper ordering
         x0, x1 = (x0, x1) if x0 <= x1 else (x1, x0)
         y0, y1 = (y0, y1) if y0 <= y1 else (y1, y0)
 
         r = int(max(0, rounded_r_px))
-        if r <= 0:
-            pts = [(x0, y0), (x1, y0), (x1, y1), (x0, y1)]
-            self.paint_polyline(pts, width_px, closed=True, mark_corridor=mark_corridor)
-            return
-
-        # Clamp radius to half of min side
+        # Clamp radius to half of side lengths
         r = int(min(r, max(0, (x1 - x0) // 2), max(0, (y1 - y0) // 2)))
         if r == 0:
             pts = [(x0, y0), (x1, y0), (x1, y1), (x0, y1)]
             self.paint_polyline(pts, width_px, closed=True, mark_corridor=mark_corridor)
             return
 
-        # Helper to sample quarter-circle arc
         def arc(cx, cy, start_ang, end_ang, samples):
             tt = np.linspace(start_ang, end_ang, samples)
             xs = cx + r * np.cos(tt)
@@ -139,25 +127,25 @@ class RasterCanvas:
             return list(zip(xs, ys))
 
         pts = []
-        # Start at top edge (left to right, leaving room for corners)
+        # Top edge
         pts.append((x0 + r, y0))
         pts.append((x1 - r, y0))
-        # Top-right corner (−pi/2 -> 0)
+        # Top-right corner
         pts += arc(x1 - r, y0 + r, -np.pi/2, 0.0, samples_per_quadrant)
-        # Right edge (top to bottom)
+        # Right edge
         pts.append((x1, y0 + r))
         pts.append((x1, y1 - r))
-        # Bottom-right corner (0 -> pi/2)
+        # Bottom-right corner
         pts += arc(x1 - r, y1 - r, 0.0, np.pi/2, samples_per_quadrant)
-        # Bottom edge (right to left)
+        # Bottom edge
         pts.append((x1 - r, y1))
         pts.append((x0 + r, y1))
-        # Bottom-left corner (pi/2 -> pi)
+        # Bottom-left corner
         pts += arc(x0 + r, y1 - r, np.pi/2, np.pi, samples_per_quadrant)
-        # Left edge (bottom to top)
+        # Left edge
         pts.append((x0, y1 - r))
         pts.append((x0, y0 + r))
-        # Top-left corner (pi -> 3pi/2)
+        # Top-left corner
         pts += arc(x0 + r, y0 + r, np.pi, 3*np.pi/2, samples_per_quadrant)
 
         self.paint_polyline(pts, width_px, closed=True, mark_corridor=mark_corridor)
@@ -250,20 +238,20 @@ def generate_floor_scene(width_m=200, height_m=100, px_per_m=4, seed=None):
     corridor_wall_th  = float(rng.uniform(0.10, 0.18) * px_per_m)
     belt_offset       = float(rng.uniform(7.0, 12.0) * px_per_m)
 
-    module_m = float(rng.choice([3.0, 3.6, 4.2, 4.8, 5.4]))
+    module_m = float(rng.choice([4.2, 4.8, 5.4, 6.0, 6.6, 7.2]))
     module_px = module_m * px_per_m
 
     # Minimum room width (unchanged policy)
     if rng.random() < 0.08:
-        min_room_w_m = rng.uniform(1.3, 2.0)  # rare small
+        min_room_w_m = rng.uniform(4.2, 4.8)  # rare small but not tiny
     else:
-        min_room_w_m = rng.uniform(2.4, 2.9)
+        min_room_w_m = rng.uniform(5.0, 6.5)
     min_room_w = float(min_room_w_m * px_per_m)
 
     # Single continuous heavy-tailed law per region: Pareto(alpha) * LogNormal
-    alpha = 1.25            # heavier tail -> more big rooms *and* small ones co-existing
-    base_area_m2 = rng.uniform(18.0, 35.0)
-    ln_sigma = 0.45         # spreads sizes continuously
+    alpha = 1.2             # heavier tail for more variability across regions
+    base_area_m2 = rng.uniform(90.0, 180.0)
+    ln_sigma = 0.55         # more spread for non-uniform sizes
     params.update(dict(ext_th=ext_th, part_th=part_th, core_th=core_th,
                        curve_prob=curve_prob, diag_prob=diag_prob,
                        corridor_w=corridor_w, corridor_wall_th=corridor_wall_th,
@@ -276,7 +264,7 @@ def generate_floor_scene(width_m=200, height_m=100, px_per_m=4, seed=None):
     canvas.paint_rect_border(2, 2, W-3, H-3, ext_th, rounded_r_px=int(round_r))
     strokes.append(dict(kind="rect_border", layer="exterior", x0=2, y0=2, x1=W-3, y1=H-3, width_px=ext_th, rounded_r_px=int(round_r)))
 
-    inset = int(ext_th + px_per_m * 0.6)
+    # removed unused variable 'inset'
 
     # ---- Cores ----
     n_cores = int(rng.integers(1, 4))
@@ -331,17 +319,33 @@ def generate_floor_scene(width_m=200, height_m=100, px_per_m=4, seed=None):
         canvas._paint_segment((cx, cy), (tx, ty), corridor_w, set_wall=False, mark_corridor=True)
         ops.append(dict(op="carve_corridor_link", p0=(int(cx), int(cy)), p1=(int(tx), int(ty)), width_px=float(corridor_w)))
 
-    # ---- Partitioning with single heavy-tailed threshold per region ----
+    # ---- Partitioning with spatially varying heavy-tailed threshold per region ----
     inner = (int(ext_th + px_per_m * 0.6), int(ext_th + px_per_m * 0.6),
              W - int(ext_th + px_per_m * 0.6) - 1, H - int(ext_th + px_per_m * 0.6) - 1)
     stack = [inner]
     splits_drawn = 0
-    max_splits = int(rng.integers(140, 260))
+    max_splits = int(rng.integers(35, 75))
 
-    def area_stop_threshold_px2():
+    # Spatial bias map: encourages larger rooms in some areas and smaller in others
+    gh = max(3, int(round(H / max(1, int(40 * px_per_m)))))
+    gw = max(3, int(round(W / max(1, int(40 * px_per_m)))))
+    region_grid = np.exp(rng.normal(0.0, 0.60, size=(gh, gw))).astype(np.float32)
+    up_h = (H + gh - 1) // gh
+    up_w = (W + gw - 1) // gw
+    scale_map = np.kron(region_grid, np.ones((up_h, up_w), dtype=np.float32))[:H, :W]
+    for _ in range(2):
+        scale_map = (np.roll(scale_map, 1, axis=1) + scale_map + np.roll(scale_map, -1, axis=1)) / 3.0
+        scale_map = (np.roll(scale_map, 1, axis=0) + scale_map + np.roll(scale_map, -1, axis=0)) / 3.0
+    scale_map = scale_map / max(1e-6, float(scale_map.mean()))
+    scale_map = np.clip(scale_map, 0.7, 2.2).astype(np.float32)
+
+    def area_stop_threshold_px2(cx, cy):
         # A_m2 ~ base * lognormal(0, ln_sigma) * (1 + Pareto(alpha))
         ln_scale = math.exp(rng.normal(0.0, ln_sigma))
         A_m2 = base_area_m2 * ln_scale * (1.0 + rng.pareto(alpha))
+        cxi = int(min(max(int(cx), 0), W - 1))
+        cyi = int(min(max(int(cy), 0), H - 1))
+        A_m2 *= float(scale_map[cyi, cxi])
         return A_m2 * (px_per_m ** 2)
 
     def draw_split(rect, vertical, s, curve=False, diag=False):
@@ -387,7 +391,7 @@ def generate_floor_scene(width_m=200, height_m=100, px_per_m=4, seed=None):
         if w < 2 * min_room_w or h < 2 * min_room_w:
             continue
         A = w * h
-        if A < area_stop_threshold_px2():
+        if A < area_stop_threshold_px2((x0 + x1) * 0.5, (y0 + y1) * 0.5):
             continue
 
         # choose split orientation
@@ -401,7 +405,7 @@ def generate_floor_scene(width_m=200, height_m=100, px_per_m=4, seed=None):
         # edge-biased split position (continuous)
         if vertical:
             smin = x0 + int(min_room_w); smax = x1 - int(min_room_w)
-            if smax - smin < module_px * 0.5: 
+            if smax - smin < module_px * 1.3: 
                 continue
             u = 0.5 * rng.random() + 0.5 * rng.beta(0.65, 2.8)  # mix for continuity
             s = int(np.clip(int(smin + u * (smax - smin)), smin, smax))
@@ -410,7 +414,7 @@ def generate_floor_scene(width_m=200, height_m=100, px_per_m=4, seed=None):
             stack.append((x0, y0, s, y1)); stack.append((s, y0, x1, y1))
         else:
             smin = y0 + int(min_room_w); smax = y1 - int(min_room_w)
-            if smax - smin < module_px * 0.5: 
+            if smax - smin < module_px * 1.3: 
                 continue
             u = 0.5 * rng.random() + 0.5 * rng.beta(0.65, 2.8)
             s = int(np.clip(int(smin + u * (smax - smin)), smin, smax))
@@ -559,6 +563,7 @@ def generate_floor_scene(width_m=200, height_m=100, px_per_m=4, seed=None):
 # ---------------- UI + save ----------------
 
 def save_artifacts(mask, normals, scene, prefix="/Users/xoren/icassp2025/generated_rooms/floorplan"):
+    os.makedirs(os.path.dirname(prefix), exist_ok=True)
     np.save(prefix + "_mask.npy", mask.astype(np.uint8))
     np.save(prefix + "_normals.npy", normals.astype(np.float32))
     with open(prefix + ".json", "w") as f:
@@ -589,3 +594,62 @@ def show_generator():
     plt.show()
 
 show_generator()
+
+# ---------------- Self-tests (gated by RG_TESTS=1) ----------------
+if os.environ.get("RG_TESTS", "0") == "1":
+    # Deterministic seed for repeatability
+    mask, normals, scene = generate_floor_scene(seed=1234)
+
+    # Shapes and dtypes
+    assert mask.dtype == np.bool_, "mask must be boolean"
+    assert normals.dtype == np.float32 and normals.shape[-1] == 2, "normals must be float32 HxWx2"
+    H, W = mask.shape
+    assert normals.shape[:2] == (H, W), "normals must match mask shape"
+
+    # Non-walls must have zero normals
+    nz = np.any(normals != 0.0, axis=-1)
+    assert not np.any(nz & (~mask)), "non-wall pixels must have zero normals"
+
+    # Some wall pixels should have non-zero normals
+    wall = mask
+    wall_nz = wall & nz
+    assert np.any(wall_nz), "expected some wall pixels to have normals"
+
+    # Normals should be approximately unit length where present
+    mag = np.linalg.norm(normals, axis=-1)
+    mag_wall_nz = mag[wall_nz]
+    assert np.isfinite(mag_wall_nz).all(), "wall normal magnitudes must be finite"
+    if mag_wall_nz.size > 0:
+        q05 = float(np.quantile(mag_wall_nz, 0.05))
+        q95 = float(np.quantile(mag_wall_nz, 0.95))
+        assert q05 >= 0.75, f"5th percentile of wall normal magnitude too low: {q05:.3f}"
+        assert q95 <= 1.05, f"95th percentile of wall normal magnitude too high: {q95:.3f}"
+
+    # Coverage: a reasonable fraction of wall pixels should carry normals (closing may add walls without normals)
+    wall_count = int(wall.sum())
+    coverage = (int(wall_nz.sum()) / max(1, wall_count)) if wall_count > 0 else 0.0
+    assert coverage >= 0.10, f"wall normal coverage too low: {coverage:.3f} (< 0.10)"
+
+    # Neighbor alignment: many adjacent wall-normal pairs should be roughly aligned (dot > 0.2)
+    aligned = 0
+    total_pairs = 0
+    for dy, dx in ((1,0),(0,1)):
+        ys = slice(max(0, dy), H)
+        xs = slice(max(0, dx), W)
+        yd = slice(0, H - dy)
+        xd = slice(0, W - dx)
+        pair_mask = wall_nz[ys, xs] & wall_nz[yd, xd]
+        if np.any(pair_mask):
+            v1 = normals[ys, xs][pair_mask]
+            v2 = normals[yd, xd][pair_mask]
+            dots = np.sum(v1 * v2, axis=-1)
+            aligned += int(np.sum(dots > 0.2))
+            total_pairs += int(dots.size)
+    if total_pairs > 0:
+        frac_aligned = aligned / total_pairs
+        assert frac_aligned >= 0.25, f"insufficient neighbor alignment: {frac_aligned:.3f} (< 0.25)"
+
+    # Scene metadata sanity
+    assert scene["canvas"]["W"] == W and scene["canvas"]["H"] == H
+    assert isinstance(scene.get("strokes"), list) and isinstance(scene.get("ops"), list)
+    assert scene.get("version") == 4
