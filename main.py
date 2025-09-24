@@ -18,10 +18,10 @@ def main():
     parser.add_argument('--num_workers', type=int, default=6, help='number of workers')
     
     parser.add_argument('--gpu', type=int, default=None, help='GPU ID to use (default: auto-seleqct)')
-    parser.add_argument('--batch_size', type=int, default=8, help='Batch size for training')
+    parser.add_argument('--batch_size', type=int, default=2, help='Batch size for training')
     parser.add_argument('--epochs', type=int, default=2000, help='Number of epochs to train')
     parser.add_argument('--lr', type=float, default=3e-4, help='Learning rate')
-    parser.add_argument('--data_dir', type=str, default='data/train/', help='Data directory')
+    parser.add_argument('--data_dir', type=str, default='data/synthetic/', help='Data directory')
     parser.add_argument('--model_dir', type=str, default='models', help='Directory to save models')
     parser.add_argument('--feature', type=str, default='transmittance', choices=['transmittance','combined'], help='which approximator feature to feed the model')
     
