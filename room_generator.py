@@ -212,6 +212,32 @@ def unit(vx, vy):
         return (0.0, 0.0)
     return (vx / n, vy / n)
 
+def sample_frequency_mhz(seed: int | None = None) -> int:
+    """
+    Return a frequency in MHz sampled from {868, 1800, 3500}.
+    Deterministic for a given seed.
+    """
+    choices = np.array([868, 1800, 3500], dtype=np.int64)
+    rng = np.random.default_rng(seed if seed is not None else int(np.random.SeedSequence().entropy))
+    return int(rng.choice(choices))
+
+def sample_antenna_location(wall_mask: np.ndarray, seed: int | None = None) -> tuple:
+    """
+    Return (x, y) antenna location sampled uniformly over free space (non-wall) pixels.
+    If no free-space pixel exists, fallback to image center.
+    """
+    rng = np.random.default_rng(seed if seed is not None else int(np.random.SeedSequence().entropy))
+    free = ~wall_mask
+    ys, xs = np.where(free)
+    if xs.size == 0:
+        raise ValueError("No free-space available for antenna placement")
+    k = int(rng.integers(0, xs.size))
+    return (int(xs[k]), int(ys[k]))
+
+def euclidean_distance_map(H: int, W: int, x: int, y: int) -> np.ndarray:
+    yy, xx = np.indices((H, W))
+    return np.sqrt((xx - float(x))**2 + (yy - float(y))**2, dtype=np.float32)
+
 # ---------------- Generator + metadata ----------------
 
 def sample_canvas_size(seed: int) -> tuple:
@@ -593,6 +619,26 @@ def generate_floor_scene(width_m=None, height_m=None, px_per_m=4, seed=None):
     canvas.nx[~canvas.wall] = 0.0
     canvas.ny[~canvas.wall] = 0.0
 
+    # Antenna location and distance map
+    # Antenna location; if none available, regenerate with a different seed
+    try:
+        ant_x, ant_y = sample_antenna_location(canvas.wall, seed + 12345)
+    except ValueError:
+        # Try a few alternative seeds deterministically derived from the base
+        for bump in (101, 202, 303, 404, 505):
+            try:
+                ant_x, ant_y = sample_antenna_location(canvas.wall, seed + 12345 + bump)
+                break
+            except ValueError:
+                continue
+        else:
+            # As last resort, restart the whole generation with a new seed
+            return generate_floor_scene(width_m, height_m, px_per_m, seed + 9999)
+    dist_map = euclidean_distance_map(H, W, ant_x, ant_y).astype(np.float32)
+
+    # Frequency metadata (for simulators)
+    freq_MHz = sample_frequency_mhz(seed + 22222)
+
     scene = dict(
         version=4,
         seed=int(seed),
@@ -600,7 +646,9 @@ def generate_floor_scene(width_m=None, height_m=None, px_per_m=4, seed=None):
                     W=int(W), H=int(H)),
         params=params,
         strokes=strokes,
-        ops=ops
+        ops=ops,
+        antenna=dict(x=int(ant_x), y=int(ant_y)),
+        frequency_MHz=int(freq_MHz)
     )
     normals = np.stack([canvas.nx, canvas.ny], axis=-1).astype(np.float32)
 
@@ -610,7 +658,7 @@ def generate_floor_scene(width_m=None, height_m=None, px_per_m=4, seed=None):
     transmittance = np.zeros_like(wall_mask, dtype=np.float32)
     if np.any(wall_mask):
         base_reflect = float(rng.uniform(1.0, 15.0))
-        base_trans = float(rng.uniform(1.0, 15.0))
+        base_trans = float(rng.uniform(5.0, 30.0))
         reflectance[wall_mask] = base_reflect
         transmittance[wall_mask] = base_trans
 
@@ -643,7 +691,7 @@ def generate_floor_scene(width_m=None, height_m=None, px_per_m=4, seed=None):
             refl_val = float(np.clip(base_reflect * rf_factor, 1.0, 15.0))
             reflectance[wm] = refl_val
 
-    return canvas.wall, normals, scene, reflectance, transmittance
+    return canvas.wall, normals, scene, reflectance, transmittance, dist_map
 
 # ---------------- UI + save ----------------
 
@@ -654,7 +702,7 @@ def _gen_id(scene: Dict[str, Any]) -> str:
     h_m = float(c.get("height_m", 0.0))
     return f"seed{seed}_w{int(round(w_m))}m_h{int(round(h_m))}m"
 
-def save_artifacts(mask, normals, scene, reflectance, transmittance, prefix_dir="/Users/xoren/icassp2025/generated_rooms"):
+def save_artifacts(mask, normals, scene, reflectance, transmittance, dist_map, prefix_dir="/Users/xoren/icassp2025/generated_rooms"):
     os.makedirs(prefix_dir, exist_ok=True)
     gen_id = _gen_id(scene)
     prefix = os.path.join(prefix_dir, gen_id)
@@ -662,6 +710,17 @@ def save_artifacts(mask, normals, scene, reflectance, transmittance, prefix_dir=
     np.save(prefix + "_normals.npy", normals.astype(np.float32))
     np.save(prefix + "_reflectance.npy", reflectance.astype(np.float32))
     np.save(prefix + "_transmittance.npy", transmittance.astype(np.float32))
+    # Save composite RGB image (R=refl, G=trans, B=distance)
+    # Normalize distance to [0, 1] per image for visualization; keep refl/trans in [1,15] mapped to [0,1]
+    dist_norm = dist_map / max(1e-6, float(np.max(dist_map)))
+    refl_norm = (reflectance - 1.0) / 14.0
+    trans_norm = (transmittance - 1.0) / 14.0
+    rgb = np.stack([
+        np.clip(refl_norm, 0.0, 1.0),
+        np.clip(trans_norm, 0.0, 1.0),
+        np.clip(dist_norm, 0.0, 1.0)
+    ], axis=-1).astype(np.float32)
+    np.save(prefix + "_rt_antenna_rgb.npy", rgb)
     with open(prefix + ".json", "w") as f:
         json.dump(scene, f, indent=2)
 
@@ -694,52 +753,94 @@ def draw_overview(fig, axes, mask, reflectance, transmittance):
 
 def show_generator():
     # Initial generation and save
-    mask, normals, scene, refl, trans = generate_floor_scene()
-    save_artifacts(mask, normals, scene, refl, trans)
+    mask, normals, scene, refl, trans, dist = generate_floor_scene()
+    save_artifacts(mask, normals, scene, refl, trans, dist)
 
-    # Create figure with three panels once
-    fig, axes = plt.subplots(1, 3, figsize=(18, 6))
+    ant = scene.get("antenna", {})
+    ax0, ay0 = int(ant.get("x", 0)), int(ant.get("y", 0))
+
+    # Create figure with four panels once
+    fig, axes = plt.subplots(1, 4, figsize=(24, 6))
     for ax in axes:
         ax.set_axis_off()
 
     # Mask panel
     axes[0].set_title("Wall mask")
-    im_mask = axes[0].imshow(mask, cmap="gray", interpolation="nearest")
+    im_mask = axes[0].imshow(mask, cmap="gray", interpolation="nearest", origin="upper")
+    star0 = axes[0].scatter([ax0], [ay0], c="red", marker="*", s=120, edgecolors="black", linewidths=0.5)
 
     # Reflectance panel
     axes[1].set_title("Reflectance (1–15)")
-    im_refl = axes[1].imshow(np.ma.masked_where(~mask, refl), cmap="magma", vmin=1.0, vmax=15.0, interpolation="nearest")
-    cbar_refl = fig.colorbar(im_refl, ax=axes[1], fraction=0.046, pad=0.04)
+    im_refl = axes[1].imshow(np.ma.masked_where(~mask, refl), cmap="magma", vmin=1.0, vmax=15.0, interpolation="nearest", origin="upper")
+    fig.colorbar(im_refl, ax=axes[1], fraction=0.046, pad=0.04)
+    star1 = axes[1].scatter([ax0], [ay0], c="red", marker="*", s=120, edgecolors="black", linewidths=0.5)
 
     # Transmittance panel
     axes[2].set_title("Transmittance (1–15)")
-    im_trans = axes[2].imshow(np.ma.masked_where(~mask, trans), cmap="viridis", vmin=1.0, vmax=15.0, interpolation="nearest")
-    cbar_trans = fig.colorbar(im_trans, ax=axes[2], fraction=0.046, pad=0.04)
+    im_trans = axes[2].imshow(np.ma.masked_where(~mask, trans), cmap="viridis", vmin=1.0, vmax=15.0, interpolation="nearest", origin="upper")
+    fig.colorbar(im_trans, ax=axes[2], fraction=0.046, pad=0.04)
+    star2 = axes[2].scatter([ax0], [ay0], c="red", marker="*", s=120, edgecolors="black", linewidths=0.5)
+
+    # Distance panel (normalized: antenna location should be near 0, thus whitish in 'Blues')
+    axes[3].set_title("Distance from antenna")
+    dist_norm = dist / max(1e-6, float(np.max(dist)))
+    im_dist = axes[3].imshow(dist_norm, cmap="plasma", vmin=0.0, vmax=1.0, interpolation="nearest", origin="upper")
+    fig.colorbar(im_dist, ax=axes[3], fraction=0.046, pad=0.04)
+    star3 = axes[3].scatter([ax0], [ay0], c="red", marker="*", s=120, edgecolors="black", linewidths=0.5, zorder=3)
+
+    # Optional debug: verify distance minimum equals antenna location
+    debug = os.environ.get("RG_DEBUG", "0") == "1"
+    min_marker = None
+    if debug:
+        mn_idx = int(np.argmin(dist)); my, mx = np.unravel_index(mn_idx, dist.shape)
+        d_at = float(dist[int(ay0), int(ax0)]) if 0 <= ay0 < dist.shape[0] and 0 <= ax0 < dist.shape[1] else float('nan')
+        print(f"[RG_DEBUG] Ant=({ax0},{ay0}) d_at={d_at:.6f} min_d={float(dist.min()):.6f} at=({mx},{my})")
+        min_marker = axes[3].scatter([mx], [my], c="lime", marker="x", s=60, linewidths=1.5, zorder=3)
 
     # Button (Matplotlib)
     from matplotlib.widgets import Button
     plt.subplots_adjust(bottom=0.16)
-    bax = plt.axes([0.44, 0.04, 0.16, 0.08])
+    bax = plt.axes([0.42, 0.04, 0.16, 0.08])
     btn = Button(bax, "New floor")
 
     def on_click(event):
         # Generate a new layout and update images without creating new artists
-        m, n, s, r, t = generate_floor_scene()
-        save_artifacts(m, n, s, r, t)
+        m, n, s, r, t, d = generate_floor_scene()
+        save_artifacts(m, n, s, r, t, d)
+        antn = s.get("antenna", {})
+        axn, ayn = int(antn.get("x", 0)), int(antn.get("y", 0))
         im_mask.set_data(m)
         im_refl.set_data(np.ma.masked_where(~m, r))
         im_trans.set_data(np.ma.masked_where(~m, t))
+        im_dist.set_data(d / max(1e-6, float(np.max(d))))
+        # Ensure axes limits match new dimensions so stars are always visible
+        Hn, Wn = m.shape
+        for ax in axes:
+            ax.set_xlim(-0.5, Wn - 0.5)
+            ax.set_ylim(Hn - 0.5, -0.5)
+        # Update star positions
+        star0.set_offsets(np.array([[axn, ayn]]))
+        star1.set_offsets(np.array([[axn, ayn]]))
+        star2.set_offsets(np.array([[axn, ayn]]))
+        star3.set_offsets(np.array([[axn, ayn]]))
+        if os.environ.get("RG_DEBUG", "0") == "1":
+            mn_idx2 = int(np.argmin(d)); my2, mx2 = np.unravel_index(mn_idx2, d.shape)
+            d_at2 = float(d[int(ayn), int(axn)]) if 0 <= ayn < d.shape[0] and 0 <= axn < d.shape[1] else float('nan')
+            print(f"[RG_DEBUG] (New) Ant=({axn},{ayn}) d_at={d_at2:.6f} min_d={float(d.min()):.6f} at=({mx2},{my2})")
+            if min_marker is not None:
+                min_marker.set_offsets(np.array([[mx2, my2]]))
         fig.canvas.draw_idle()
 
     btn.on_clicked(on_click)
     plt.show()
 
-show_generator()
+if __name__ == "__main__":
+    show_generator()
 
 # ---------------- Self-tests (gated by RG_TESTS=1) ----------------
 if os.environ.get("RG_TESTS", "0") == "1":
     # Deterministic seed for repeatability
-    mask, normals, scene, refl, trans = generate_floor_scene(seed=1234)
+    mask, normals, scene, refl, trans, dist = generate_floor_scene(seed=1234)
 
     # Shapes and dtypes
     assert mask.dtype == np.bool_, "mask must be boolean"
@@ -821,6 +922,15 @@ if os.environ.get("RG_TESTS", "0") == "1":
         tmin, tmax = float(np.min(trans[mask])), float(np.max(trans[mask]))
         assert 1.0 <= rmin <= 15.0 and 1.0 <= rmax <= 15.0
         assert 1.0 <= tmin <= 15.0 and 1.0 <= tmax <= 15.0
+
+    # Antenna location and distance map sanity
+    ant = scene.get("antenna", {})
+    assert "x" in ant and "y" in ant
+    ax, ay = int(ant["x"]), int(ant["y"])
+    assert 0 <= ax < W and 0 <= ay < H
+    assert dist.shape == mask.shape and dist.dtype == np.float32
+    # Distance at antenna should be ~0
+    assert dist[ay, ax] <= 1e-3
 
     # If all assertions passed, print a concise success summary with key values
     print("[RG_TESTS] All tests passed.")

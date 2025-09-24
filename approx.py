@@ -400,7 +400,7 @@ def calculate_combined_loss_with_normals(
     max_refl=MAX_REFL, max_trans=MAX_TRANS,
     pixel_size=0.25,
     radial_step=1.0,
-    max_loss=160.0,
+    max_loss=32000.0,
     use_fspl_lut=True
 ):
     h, w = reflectance_mat.shape
@@ -460,7 +460,7 @@ def _warmup_numba_once():
 #  TRANSMISSION-ONLY TRACE                                             #
 # ---------------------------------------------------------------------#
 @njit(parallel=True, fastmath=True, nogil=True, boundscheck=False)
-def calculate_transmission_loss_numpy(trans_mat, x_ant, y_ant, freq_MHz, n_angles=360*128, radial_step=1.0, max_walls=MAX_TRANS, max_loss=160.0, pixel_size=0.25):
+def calculate_transmission_loss_numpy(trans_mat, x_ant, y_ant, freq_MHz, n_angles=360*128, radial_step=1.0, max_walls=MAX_TRANS, max_loss=32000.0, pixel_size=0.25):
 
     h, w  = trans_mat.shape
     out   = np.full((h,w), max_loss, np.float64)  # Initialize to max_loss like combined method
@@ -561,7 +561,7 @@ class Approx:
                 radial_step=1.0,
                 use_fspl_lut=True
             )
-            feat = apply_backfill(feat, cnt, x, y, 0.25, f, 160.0, BACKFILL_METHOD, BACKFILL_PARAMS, trans_mat=trans_c)
+            feat = apply_backfill(feat, cnt, x, y, 0.25, f, 32000.0, BACKFILL_METHOD, BACKFILL_PARAMS, trans_mat=trans_c)
         elif self.method == 'combined_fast':
             # Aggressive speed settings; expect some accuracy loss
             fast_refl = max_refl if max_refl < 3 else 3
@@ -574,7 +574,7 @@ class Approx:
                 radial_step=1.0,
                 use_fspl_lut=True
             )
-            feat = apply_backfill(feat, cnt, x, y, 0.25, f, 160.0, BACKFILL_METHOD, BACKFILL_PARAMS, trans_mat=trans_c)
+            feat = apply_backfill(feat, cnt, x, y, 0.25, f, 32000.0, BACKFILL_METHOD, BACKFILL_PARAMS, trans_mat=trans_c)
         elif self.method == 'beamtrace':
             from beamtrace import calculate_beamtrace_loss_with_normals  # local import to avoid cyclic jit cost
             feat, _ = calculate_beamtrace_loss_with_normals(
@@ -583,8 +583,8 @@ class Approx:
         else:
             feat, cnt = calculate_transmission_loss_numpy(trans_c, x, y, f, n_angles=360*128, max_walls=max_trans)
             feat = feat.astype(np.float32)
-            feat = apply_backfill(feat, cnt.astype(np.float32), x, y, 0.25, f, 160.0, BACKFILL_METHOD, BACKFILL_PARAMS, trans_mat=trans_c)
-        feat = np.minimum(feat, 160.0)
+            feat = apply_backfill(feat, cnt.astype(np.float32), x, y, 0.25, f, 32000.0, BACKFILL_METHOD, BACKFILL_PARAMS, trans_mat=trans_c)
+        feat = np.minimum(feat, 32000.0)
         return torch.from_numpy(np.floor(feat))
 
     def predict(self, samples, max_trans=MAX_TRANS, max_refl=MAX_REFL, num_workers: int = 0, numba_threads: int = 0, backend: str = "threads"):
@@ -667,7 +667,7 @@ if __name__ == "__main__":
             radial_step=1.0,
             use_fspl_lut=True)
         # Apply backfill to combined for fair comparison
-        cmb_map = apply_backfill(cmb_map.astype(np.float32), cmb_cnt.astype(np.float32), x, y, 0.25, f, 160.0, BACKFILL_METHOD, BACKFILL_PARAMS, trans_mat=trans)
+        cmb_map = apply_backfill(cmb_map.astype(np.float32), cmb_cnt.astype(np.float32), x, y, 0.25, f, 32000.0, BACKFILL_METHOD, BACKFILL_PARAMS, trans_mat=trans)
 
         if args.compare0:
             compare_two_matrices(cmb_map, tx_map,
@@ -767,7 +767,7 @@ if __name__ == "__main__":
         for col, (mat, title) in enumerate(zip(row_mats, row_titles)):
             ax = axes[row, col]
             if col < len(mats):
-                im = ax.imshow(mat, vmax=160)
+                im = ax.imshow(mat)
             else:
                 # grayscale for diffs and masks
                 im = ax.imshow(mat, cmap='gray', vmin=0, vmax=1 if mat.dtype!=_np.float64 and mat.max()<=1.0 else None)
