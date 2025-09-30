@@ -7,8 +7,8 @@ from tqdm import tqdm
 from torchvision.io import read_image
 from torch.amp import autocast, GradScaler
 
+from loss import se
 from inference import PathlossPredictor
-from loss import se, create_sip2net_loss
 from kaggle_eval import kaggle_async_eval
 
 
@@ -50,11 +50,6 @@ def train_model(model, train_loader, val_samples, optimizer, scheduler, num_epoc
     scaler = GradScaler(enabled=True)
     inference_model = PathlossPredictor(model=model)
     
-    # Setup SIP2Net loss if requested
-    if use_sip2net:
-        print(f"Using SIP2Net loss")
-        sip2net_criterion = create_sip2net_loss(use_mse=True, **sip2net_params)
-
     for epoch in range(num_epochs):
         print(f'Epoch {epoch+1}/{num_epochs}\n{"-"*10}')
         model.train()
@@ -72,11 +67,7 @@ def train_model(model, train_loader, val_samples, optimizer, scheduler, num_epoc
                 batch_se = se(preds, targets, masks)
                 batch_mse = batch_se / masks.sum()
                 
-                # Use SIP2Net loss if requested
-                if use_sip2net:
-                    loss, _ = sip2net_criterion(preds, targets, masks)
-                else:
-                    loss = batch_mse
+                loss = batch_mse
 
             scaler.scale(loss).backward()
             scaler.step(optimizer)
