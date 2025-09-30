@@ -18,7 +18,7 @@ def main():
     parser.add_argument('--num_workers', type=int, default=6, help='number of workers')
     
     parser.add_argument('--gpu', type=int, default=None, help='GPU ID to use (default: auto-seleqct)')
-    parser.add_argument('--batch_size', type=int, default=2, help='Batch size for training')
+    parser.add_argument('--batch_size', type=int, default=8, help='Batch size for training')
     parser.add_argument('--epochs', type=int, default=2000, help='Number of epochs to train')
     parser.add_argument('--lr', type=float, default=3e-4, help='Learning rate')
     parser.add_argument('--data_dir', type=str, default='data/synthetic/', help='Data directory')
@@ -105,14 +105,13 @@ def main():
     model = UNetModel().to(device)
     
     optimizer = optim.Adam(model.parameters(), lr=args.lr, weight_decay=1e-5)    
-    scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, mode='min', factor=0.5, patience=500, verbose=True)
     
     train_model(
         model=model, 
         train_loader=train_loader, 
         val_samples=val_files, 
         optimizer=optimizer, 
-        scheduler=scheduler,
+        scheduler=None,
         num_epochs=args.epochs, 
         logger=logger, 
         device=device, 

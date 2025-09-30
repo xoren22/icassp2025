@@ -7,6 +7,8 @@ from tqdm import tqdm
 from PIL import Image
 import pandas as pd
 import shutil
+import time
+import secrets
 
 from approx import Approx
 from helper import RadarSample
@@ -217,11 +219,13 @@ def main():
 
 	parser = argparse.ArgumentParser("Room generation + approximation pipeline")
 	parser.add_argument('--num', type=int, default=5, help='Number of rooms to generate and approximate')
+	parser.add_argument('--batch_size', type=int, default=10, help='Batch size for generate->predict->save streaming')
 	parser.add_argument('--workers', type=int, default=0, help='Parallel workers for prediction (0/1 = auto)')
 	parser.add_argument('--backend', type=str, default='processes', choices=['threads','processes'], help='Parallel backend for prediction')
 	parser.add_argument('--numba_threads', type=int, default=0, help='Numba threads per worker (0 = auto)')
 	parser.add_argument('--make_dataset', action='store_true', help='Export synthetic dataset matching data/train structure (Task_2_ICASSP)')
 	parser.add_argument('--data_out', type=str, default='data/synthetic', help='Output dataset directory')
+	parser.add_argument('--run_id', type=str, default=None, help='Unique run identifier; auto-generated if omitted')
 	args = parser.parse_args()
 
 	# If requested, build synthetic dataset and exit
@@ -230,6 +234,7 @@ def main():
 		return
 
 	N = int(max(1, args.num))
+	B = int(max(1, args.batch_size))
 
 	# Choose fast, safe defaults if not provided: processes backend, 1 Numba thread per worker
 	import multiprocessing as _mp
@@ -241,43 +246,62 @@ def main():
 	if args.backend not in ('threads','processes') or args.backend == 'threads' and (args.workers is None or args.workers <= 0):
 		chosen_backend = 'processes'
 
-	out_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'generated_rooms')
+	base_out_root = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'generated_rooms')
+	os.makedirs(base_out_root, exist_ok=True)
+
+	# Unique run identifier and output dir (safe across concurrent runs)
+	if args.run_id and len(str(args.run_id)) > 0:
+		run_id = str(args.run_id)
+	else:
+		# timestamp (µs) + pid + random 16-bit suffix
+		us = int(time.time() * 1_000_000)
+		pid = os.getpid() & 0xFFFF
+		rnd = secrets.randbits(16)
+		run_id = f"{us}_{pid:04x}_{rnd:04x}"
+	out_dir = os.path.join(base_out_root, run_id)
 	os.makedirs(out_dir, exist_ok=True)
+	logging.info(f"Run ID: {run_id}; outputs -> {out_dir}")
 
-	# Stage 1: generate N rooms and persist normals for approx.py
-	logging.info(f"Generating {N} rooms...")
-	generated = []
-	for i in tqdm(range(N), desc='Generating'):
-		mask, normals, scene, refl, trans, dist = generate_floor_scene()
-		# Stats
-		nz_refl = int(np.count_nonzero(refl)); nz_trans = int(np.count_nonzero(trans))
-		min_refl = float(np.min(refl)) if nz_refl > 0 else 0.0
-		max_refl = float(np.max(refl)) if nz_refl > 0 else 0.0
-		min_trans = float(np.min(trans)) if nz_trans > 0 else 0.0
-		max_trans = float(np.max(trans)) if nz_trans > 0 else 0.0
-		logging.debug(f"[{i}] refl nz={nz_refl} [{min_refl:.2f},{max_refl:.2f}], trans nz={nz_trans} [{min_trans:.2f},{max_trans:.2f}]")
+	# Building IDs: integer seconds timestamp + random offset [0, 1_000_000]
 
-		# Persist normals with unique building_id per sample
-		building_id = i
-		_save_normals_npz(normals, building_id, mask.shape)
-
-		# Build sample aligned with approx.py expectations
-		sample = build_sample_from_generated(mask, normals, scene, refl, trans, dist, building_id=building_id)
-		generated.append((sample, refl, trans, scene))
-
-	# Stage 2: approximate sequentially with tqdm
-	logging.info("Approximating rooms...")
+	# Streamed Stage 1+2: generate->predict->save in batches
+	logging.info(f"Processing {N} samples in batches of {B} (backend={chosen_backend}, workers={chosen_workers})...")
 	model = Approx('combined')
-	samples = [t[0] for t in generated]
-	# Use built-in parallel prediction with selected defaults
-	preds = model.predict(samples, num_workers=chosen_workers, numba_threads=chosen_numba_threads, backend=chosen_backend)
-	for i, ((sample, refl, trans, scene), pred_t) in enumerate(zip(generated, preds)):
-		pred = pred_t.cpu().numpy() if hasattr(pred_t, 'cpu') else np.array(pred_t)
-		width_m = scene['canvas']['width_m']; height_m = scene['canvas']['height_m']
-		freq = scene.get('frequency_MHz', 1800)
-		viz_path = os.path.join(out_dir, f'pipeline_demo_{i:03d}.png')
-		visualize_triplet(trans, refl, pred, sample.x_ant, sample.y_ant, width_m, height_m, freq, save_path=viz_path)
-	logging.info("Done.")
+	global_idx = 0
+	for start in tqdm(range(0, N, B), desc='Batches'):
+		end = min(start + B, N)
+		batch = []  # (sample, refl, trans, scene, gidx)
+		for _ in range(start, end):
+			mask, normals, scene, refl, trans, dist = generate_floor_scene()
+			# Stats (debug)
+			nz_refl = int(np.count_nonzero(refl)); nz_trans = int(np.count_nonzero(trans))
+			min_refl = float(np.min(refl)) if nz_refl > 0 else 0.0
+			max_refl = float(np.max(refl)) if nz_refl > 0 else 0.0
+			min_trans = float(np.min(trans)) if nz_trans > 0 else 0.0
+			max_trans = float(np.max(trans)) if nz_trans > 0 else 0.0
+			logging.debug(f"[{global_idx}] refl nz={nz_refl} [{min_refl:.2f},{max_refl:.2f}], trans nz={nz_trans} [{min_trans:.2f},{max_trans:.2f}]")
+
+			# Persist normals with requested building_id scheme
+			building_id = int(time.time()) + np.random.randint(0, 1_000_000)
+			_save_normals_npz(normals, building_id, mask.shape)
+
+			# Build sample aligned with approx.py expectations
+			sample = build_sample_from_generated(mask, normals, scene, refl, trans, dist, building_id=building_id)
+			batch.append((sample, refl, trans, scene, global_idx))
+			global_idx += 1
+
+		# Predict for this batch
+		samples = [t[0] for t in batch]
+		preds = model.predict(samples, num_workers=chosen_workers, numba_threads=chosen_numba_threads, backend=chosen_backend)
+		for (sample, refl, trans, scene, gidx), pred_t in zip(batch, preds):
+			pred = pred_t.cpu().numpy() if hasattr(pred_t, 'cpu') else np.array(pred_t)
+			width_m = scene['canvas']['width_m']; height_m = scene['canvas']['height_m']
+			freq = scene.get('frequency_MHz', 1800)
+			viz_name = f'pipeline_demo_{gidx:06d}_{run_id}.png'
+			viz_path = os.path.join(out_dir, viz_name)
+			visualize_triplet(trans, refl, pred, sample.x_ant, sample.y_ant, width_m, height_m, freq, save_path=viz_path)
+
+	logging.info("All batches processed. Done.")
 
 
 if __name__ == "__main__":

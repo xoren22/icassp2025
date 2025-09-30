@@ -9,6 +9,8 @@ backups/
 __pycache__/
 generated_rooms/
 inference_outputs/
+analysis_outputs/
+parsed_buildings/
 
 # files
 tmp.py
