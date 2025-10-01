@@ -6,7 +6,6 @@ from torch.utils.data import DataLoader
 
 from model import UNetModel
 from logger import TrainingLogger
-from utils import split_data_task1
 from train_module import train_model
 from _types import RadarSampleInputs
 from data_module import PathlossDataset
@@ -21,7 +20,9 @@ def main():
     parser.add_argument('--batch_size', type=int, default=8, help='Batch size for training')
     parser.add_argument('--epochs', type=int, default=2000, help='Number of epochs to train')
     parser.add_argument('--lr', type=float, default=3e-4, help='Learning rate')
-    parser.add_argument('--data_dir', type=str, default='data/synthetic/', help='Data directory')
+    parser.add_argument('--data_dir', type=str, default='data/synthetic/', help='Data directory (default if train/val dirs not provided)')
+    parser.add_argument('--train_data_dir', type=str, default=None, help='Training data directory (overrides --data_dir)')
+    parser.add_argument('--val_data_dir', type=str, default=None, help='Validation data directory (if not set, a split from training data is used)')
     parser.add_argument('--model_dir', type=str, default='models', help='Directory to save models')
     parser.add_argument('--feature', type=str, default='transmittance', choices=['transmittance','combined'], help='which approximator feature to feed the model')
     
@@ -38,52 +39,64 @@ def main():
     # Define paths
     freqs_MHz = [868, 1800, 3500]
     BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-    DATA_DIR = os.path.join(BASE_DIR, args.data_dir)
-    INPUT_PATH = os.path.join(DATA_DIR, f"Inputs/Task_2_ICASSP/")
-    OUTPUT_PATH = os.path.join(DATA_DIR, f"Outputs/Task_2_ICASSP/")
-    POSITIONS_PATH = os.path.join(DATA_DIR, "Positions/")
-    RADIATION_PATTERNS_PATH = os.path.join(DATA_DIR, "Radiation_Patterns/")
     MODEL_SAVE_PATH = os.path.join(BASE_DIR, args.model_dir)
-    
-    inputs_list = []
-    for b in range(1, 26):  # 25 buildings
-        for ant in range(1, 3):  # 2 antenna types
-            for f in range(1, 4):  # 3 frequencies
-                for sp in range(80):  # 80 sampling positions
-                    # Check if file exists
-                    input_file = f"B{b}_Ant{ant}_f{f}_S{sp}.png"
-                    output_file = f"B{b}_Ant{ant}_f{f}_S{sp}.png"
-                    
-                    if os.path.exists(os.path.join(INPUT_PATH, input_file)) and \
-                       os.path.exists(os.path.join(OUTPUT_PATH, output_file)):
+
+    def make_abs_dir(path_like):
+        if path_like is None:
+            return None
+        return path_like if os.path.isabs(path_like) else os.path.join(BASE_DIR, path_like)
+
+    train_data_dir = make_abs_dir(args.train_data_dir) or os.path.join(BASE_DIR, args.data_dir)
+    val_data_dir = make_abs_dir(args.val_data_dir) if args.val_data_dir else None
+
+    def enumerate_samples(data_dir):
+        input_path = os.path.join(data_dir, "Inputs/Task_2_ICASSP/")
+        output_path = os.path.join(data_dir, "Outputs/Task_2_ICASSP/")
+        positions_path = os.path.join(data_dir, "Positions/")
+        radiation_patterns_path = os.path.join(data_dir, "Radiation_Patterns/")
+
+        samples = []
+        for b in range(1, 26):
+            for ant in range(1, 3):
+                for f in range(1, 4):
+                    for sp in range(80):
                         input_file = f"B{b}_Ant{ant}_f{f}_S{sp}.png"
                         output_file = f"B{b}_Ant{ant}_f{f}_S{sp}.png"
-                        radiation_file = f"Ant{ant}_Pattern.csv"
-                        position_file = f"Positions_B{b}_Ant{ant}_f{f}.csv"
+                        if os.path.exists(os.path.join(input_path, input_file)) and \
+                           os.path.exists(os.path.join(output_path, output_file)):
+                            radiation_file = f"Ant{ant}_Pattern.csv"
+                            position_file = f"Positions_B{b}_Ant{ant}_f{f}.csv"
 
-                        freq_MHz = freqs_MHz[f-1]
-                        input_img_path = os.path.join(INPUT_PATH, input_file)
-                        output_img_path = os.path.join(OUTPUT_PATH, output_file)
-                        positions_path = os.path.join(POSITIONS_PATH, position_file)
-                        
-                        radiation_pattern_file = os.path.join(RADIATION_PATTERNS_PATH, radiation_file)
+                            freq_MHz = freqs_MHz[f-1]
+                            input_img_path = os.path.join(input_path, input_file)
+                            output_img_path = os.path.join(output_path, output_file)
+                            pos_path = os.path.join(positions_path, position_file)
+                            radiation_pattern_file = os.path.join(radiation_patterns_path, radiation_file)
 
-                        radar_sample_inputs = RadarSampleInputs(
-                            freq_MHz=freq_MHz,
-                            input_file=input_img_path,
-                            output_file=output_img_path,
-                            position_file=positions_path,
-                            radiation_pattern_file=radiation_pattern_file,
-                            sampling_position=sp,
-                            ids=(b, ant, f, sp),
-                        )
-                        inputs_list.append(radar_sample_inputs)
+                            samples.append(
+                                RadarSampleInputs(
+                                    freq_MHz=freq_MHz,
+                                    input_file=input_img_path,
+                                    output_file=output_img_path,
+                                    position_file=pos_path,
+                                    radiation_pattern_file=radiation_pattern_file,
+                                    sampling_position=sp,
+                                    ids=(b, ant, f, sp),
+                                )
+                            )
+        return samples
+
+    train_files = enumerate_samples(train_data_dir)
 
     logger = TrainingLogger()
     print(f"\nLogging results at {logger.log_dir}\n\n")
 
     split_save_path=os.path.join(logger.log_dir, "train_val_split.pkl")
-    train_files, val_files = split_data_task1(inputs_list, val_ratio=0.20, split_save_path=split_save_path)
+    if val_data_dir:
+        val_files = enumerate_samples(val_data_dir)
+    else:
+        from utils import split_data_task1
+        train_files, val_files = split_data_task1(train_files, val_ratio=0.20, split_save_path=split_save_path)
     print(f"Train: {len(train_files)}, Validation: {len(val_files)}")
     
     augmentations = AugmentationPipeline(

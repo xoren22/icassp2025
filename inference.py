@@ -5,7 +5,7 @@ from utils import load_model
 from _types import RadarSampleInputs
 from featurizer import featurize_inputs
 from augmentations import normalize_size, resize_linear
-from data_module import read_sample, IMG_TARGET_SIZE, INITIAL_PIXEL_SIZE
+from data_module import read_sample, IMG_TARGET_SIZE
 
 
 class PathlossPredictor:
@@ -52,8 +52,9 @@ class PathlossPredictor:
                 sample = normalize_size(sample, IMG_TARGET_SIZE)
                 
                 mask = sample.mask
-                scaling_factor = INITIAL_PIXEL_SIZE / sample.pixel_size
-                norm_h, norm_w = int(old_h * scaling_factor), int(old_w * scaling_factor)
+                # Recompute normalized dims using the exact formula from normalize_size
+                scale_factor = min(IMG_TARGET_SIZE / old_h, IMG_TARGET_SIZE / old_w)
+                norm_h, norm_w = int(old_h * scale_factor), int(old_w * scale_factor)
 
                 input_tensor = featurize_inputs(sample).to(device)
 
@@ -98,8 +99,8 @@ if __name__ == "__main__":
     from config import BASE_DIR
     from utils import matrix_to_image
 
-    model_path = f'{BASE_DIR}/icassp2025/models/best_model.pth'
-    split_file = f'{BASE_DIR}/icassp2025/logs/2025-03-28_02-10-49/train_val_split.pkl'
+    model_path = f'{BASE_DIR}/models/best_model.pth'
+    split_file = f'{BASE_DIR}/logs/2025-09-30_19-09-27/train_val_split.pkl'
     with open(split_file, "rb") as f:
         split = pkl.load(f)
     
@@ -113,10 +114,11 @@ if __name__ == "__main__":
     for s, pred, tgt in zip(val_samples, batched_pred, val_targets):
         b, ant, f, sp = s['ids']
         fname = f"B{b}_Ant{ant}_f{f}_S{sp}.png"
-        save_path = f"{BASE_DIR}/icassp2025/foo/{fname}"
+        save_path = f"{BASE_DIR}/{fname}"
         matrix_to_image(tgt, pred, save_path=save_path)
 
     tgt_samples_flat = np.concatenate([A.flatten() for A in val_targets])
     pred_samples_flat = np.concatenate([A.flatten() for A in batched_pred])
     
     val_rmse = np.sqrt(np.mean(np.square(pred_samples_flat - tgt_samples_flat)))
+    print(f"Validation RMSE: {val_rmse}")

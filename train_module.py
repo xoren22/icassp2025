@@ -39,9 +39,7 @@ def evaluate_model(inference_model, val_samples, batch_size=8):
     val_rmse = np.sqrt(np.mean((np.square(preds_np - targets_np))))
 
     return val_rmse
-
-def evaluate_model(inference_model, val_samples, batch_size=8):
-    return 1 / time()
+    
 
 def train_model(model, train_loader, val_samples, optimizer, scheduler, num_epochs, save_dir, logger, device=None, use_sip2net=False, sip2net_params={}):
     os.makedirs(save_dir, exist_ok=True)
@@ -85,7 +83,8 @@ def train_model(model, train_loader, val_samples, optimizer, scheduler, num_epoc
         print(f"Validation RMSE: {val_loss} taking {time() - t0}")
 
         current_lr = optimizer.param_groups[0]['lr']
-        scheduler.step(val_loss)
+        if scheduler is not None:
+            scheduler.step(val_loss)
         logger.log_epoch_loss(val_loss, epoch, current_lr)
 
         kaggle_async_eval(
