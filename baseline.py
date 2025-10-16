@@ -120,7 +120,6 @@ def main():
     print("\nFinal Results:")
     for name, result in results.items():
         print(f"{name.capitalize()} RMSE:   {result['rmse']:.4f}")
-        print(f"{name.capitalize()} MSE:    {result['mse']:.4f}")
         print(f"Total pixels: {result['total_pixels']:,}")
 
 if __name__ == "__main__":

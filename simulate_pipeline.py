@@ -4,11 +4,9 @@ import numpy as np
 import torch
 import matplotlib.pyplot as plt
 from tqdm import tqdm
-from PIL import Image
-import pandas as pd
-import shutil
 import time
 import secrets
+import json
 
 from approx import Approx
 from helper import RadarSample
@@ -32,6 +30,36 @@ def _save_normals_npz(normals: np.ndarray, building_id: int, expected_shape: tup
 	with open(path, "wb") as f:
 		np.savez(f, nx=nx, ny=ny)
 	return path
+
+
+def _export_sample_npz_json(out_root: str, sample_name: str, arrays: dict, metadata: dict) -> tuple[str, str]:
+	"""
+	Save arrays to {out_root}/{sample_name}/{sample_name}.npz (compressed) and metadata JSON alongside.
+	Returns (npz_path, json_path).
+	"""
+	sample_dir = os.path.join(out_root, sample_name)
+	os.makedirs(sample_dir, exist_ok=True)
+	npz_path = os.path.join(sample_dir, f"{sample_name}.npz")
+	json_path = os.path.join(sample_dir, f"{sample_name}.json")
+
+	# Normalize dtypes for compact, precise storage
+	np_arrays = {}
+	for key, val in arrays.items():
+		if isinstance(val, torch.Tensor):
+			val = val.detach().cpu().numpy()
+		if isinstance(val, np.ndarray):
+			if val.dtype.kind in ('f',):
+				np_arrays[key] = val.astype(np.float32, copy=False)
+			else:
+				np_arrays[key] = val
+		else:
+			raise TypeError(f"Array value for key '{key}' must be a numpy array or tensor, got {type(val)}")
+
+	with open(npz_path, "wb") as f:
+		np.savez_compressed(f, **np_arrays)
+	with open(json_path, "w") as f:
+		json.dump(metadata, f, indent=2)
+	return npz_path, json_path
 
 
 def build_sample_from_generated(mask, normals, scene, reflectance, transmittance, dist_map, building_id: int = 0):
@@ -99,11 +127,9 @@ def visualize_triplet(transmittance, reflectance, pred, x_ant, y_ant, width_m, h
 
 def _build_synthetic_dataset(args):
 	"""
-	Generate a synthetic dataset compatible with main.py expectations (Task_2_ICASSP):
-	  - Inputs/Task_2_ICASSP/B{b}_Ant{ant}_f{f}_S{sp}.png (RGB: refl, trans, distance[m])
-	  - Outputs/Task_2_ICASSP/B{b}_Ant{ant}_f{f}_S{sp}.png (L pathloss dB)
-	  - Positions/Positions_B{b}_Ant{ant}_f{f}.csv (80 rows; X,Y,Azimuth)
-	  - Radiation_Patterns/Ant{1,2}_Pattern.csv (copied or isotropic fallback)
+	Generate a synthetic dataset as precise per-sample bundles (no PNG/CSV):
+	- <out_dir>/samples/<name>/<name>.npz arrays: normals(HxWx2), reflectance, transmittance, distance_m, mask, pathloss
+	- <out_dir>/samples/<name>/<name>.json metadata: antenna(px), frequency_MHz, canvas(m), ids, pixel_size_m
 	"""
 	base_dir = os.path.dirname(os.path.abspath(__file__))
 	# Resolve output dir
@@ -111,41 +137,12 @@ def _build_synthetic_dataset(args):
 	if not os.path.isabs(out_dir):
 		out_dir = os.path.join(base_dir, out_dir)
 
-	inputs_dir = os.path.join(out_dir, 'Inputs', 'Task_2_ICASSP')
-	outputs_dir = os.path.join(out_dir, 'Outputs', 'Task_2_ICASSP')
-	positions_dir = os.path.join(out_dir, 'Positions')
-	rp_dir = os.path.join(out_dir, 'Radiation_Patterns')
-	for d in (inputs_dir, outputs_dir, positions_dir, rp_dir):
-		os.makedirs(d, exist_ok=True)
-
-	# Copy radiation patterns for Ant1, Ant2 if present; else create isotropic zeros
-	src_rp_dir = os.path.join(base_dir, 'data', 'train', 'Radiation_Patterns')
-	for ant in (1, 2):
-		dst = os.path.join(rp_dir, f'Ant{ant}_Pattern.csv')
-		if not os.path.exists(dst):
-			src = os.path.join(src_rp_dir, f'Ant{ant}_Pattern.csv')
-			if os.path.exists(src):
-				shutil.copyfile(src, dst)
-			else:
-				pd.Series([0.0]*360).to_csv(dst, index=False, header=False)
-
-	# Ensure a positions CSV exists with 80 rows and index 0..79
-	def ensure_positions_csv(b: int, ant: int, f: int, x_ant: int, y_ant: int, azimuth: int = 0):
-		path = os.path.join(positions_dir, f'Positions_B{b}_Ant{ant}_f{f}.csv')
-		if os.path.exists(path):
-			return path
-		df = pd.DataFrame({
-			'X': [x_ant]*80,
-			'Y': [y_ant]*80,
-			'Azimuth': [azimuth]*80,
-		})
-		df.to_csv(path, index=True)
-		return path
+	samples_dir = os.path.join(out_dir, 'samples')
+	os.makedirs(samples_dir, exist_ok=True)
 
 	N = int(max(1, args.num))
-	approx_model = Approx('combined')
-	sp_counters = {}
-	logging.info(f"Building synthetic dataset with {N} samples at {out_dir}")
+	approx_model = Approx()
+	logging.info(f"Building synthetic dataset (NPZ+JSON) with {N} samples at {out_dir}")
 
 	for i in tqdm(range(N), desc='SynthSamples'):
 		mask, normals, scene, refl, trans, dist = generate_floor_scene()
@@ -161,54 +158,44 @@ def _build_synthetic_dataset(args):
 		except ValueError:
 			f_idx = 1 + int(np.argmin([abs(freq_MHz - v) for v in freqs]))
 
+		# Simple synthetic ids for traceability
 		b = (i % 10) + 1
 		ant_id = (i % 2) + 1
-		key = (b, ant_id, f_idx)
-		sp = sp_counters.get(key, 0)
-		if sp >= 80:
-			# find another slot
-			found = False
-			for bb in range(1, 11):
-				for aa in (1, 2):
-					for ff in (1, 2, 3):
-						k2 = (bb, aa, ff)
-						if sp_counters.get(k2, 0) < 80:
-							key = k2; b, ant_id, f_idx = k2; sp = sp_counters.get(k2, 0); found = True; break
-						# end for ff
-					if found: break
-				# end for aa
-				if found: break
-			# end for bb
-			if not found:
-				break
+		sp = i
 
-		# Persist normals for this synthetic building id
+		# Persist normals for this synthetic building id (required by approx.py)
 		_save_normals_npz(normals, b, mask.shape)
 
 		sample = build_sample_from_generated(mask, normals, scene, refl, trans, dist, building_id=b)
-		# Override ids to (b, ant, f, sp)
-		sample.ids = (int(b), int(ant_id), int(f_idx), int(sp))
+		# Override ids to list containing one tuple as expected by approx.py
+		sample.ids = [(int(b), int(ant_id), int(f_idx), int(sp))]
 
-		# Predict pathloss map
+		# Predict pathloss map (keep full precision floats)
 		pred = approx_model.approximate(sample).cpu().numpy().astype(np.float32)
-		pred = np.clip(pred, 0.0, 255.0)
 
-		# Prepare input RGB image
-		refl_u8 = np.clip(refl * 10.0, 0.0, 255.0).astype(np.uint8)
-		trans_u8 = np.clip(trans * 10.0, 0.0, 255.0).astype(np.uint8)
-		dist_m = dist * 0.25
-		dist_u8 = np.clip(dist_m, 0.0, 255.0).astype(np.uint8)
-		rgb = np.stack([refl_u8, trans_u8, dist_u8], axis=-1)
-
-		in_name = f'B{b}_Ant{ant_id}_f{f_idx}_S{sp}.png'
-		out_name = in_name
-		Image.fromarray(rgb, mode='RGB').save(os.path.join(inputs_dir, in_name))
-		Image.fromarray(pred.astype(np.uint8), mode='L').save(os.path.join(outputs_dir, out_name))
-
-		# Ensure positions CSV
-		ensure_positions_csv(b, ant_id, f_idx, x_ant=x_ant, y_ant=y_ant, azimuth=0)
-
-		sp_counters[key] = sp + 1
+		# Save per-sample arrays and metadata
+		distance_m = (dist.astype(np.float32, copy=False)) * float(sample.pixel_size)
+		sample_name = f'B{b}_Ant{ant_id}_f{f_idx}_S{sp}'
+		arrays = {
+			'normals': normals.astype(np.float32, copy=False),
+			'reflectance': refl.astype(np.float32, copy=False),
+			'transmittance': trans.astype(np.float32, copy=False),
+			'distance_m': distance_m,
+			'mask': mask.astype(np.uint8, copy=False),
+			'pathloss': pred,
+		}
+		canvas = scene.get('canvas', {})
+		metadata = {
+			'sample_name': sample_name,
+			'shape_hw': [int(H), int(W)],
+			'pixel_size_m': float(sample.pixel_size),
+			'antenna': {'x_px': int(x_ant), 'y_px': int(y_ant)},
+			'frequency_MHz': int(freq_MHz),
+			'canvas': {'width_m': float(canvas.get('width_m', 0.0)), 'height_m': float(canvas.get('height_m', 0.0))},
+			'ids': {'building': int(b), 'antenna': int(ant_id), 'frequency_index': int(f_idx), 'sample_index': int(sp)},
+			'created_at_unix_s': float(time.time()),
+		}
+		_export_sample_npz_json(samples_dir, sample_name, arrays, metadata)
 
 	logging.info("Synthetic dataset export complete.")
 
@@ -223,9 +210,10 @@ def main():
 	parser.add_argument('--workers', type=int, default=0, help='Parallel workers for prediction (0/1 = auto)')
 	parser.add_argument('--backend', type=str, default='processes', choices=['threads','processes'], help='Parallel backend for prediction')
 	parser.add_argument('--numba_threads', type=int, default=0, help='Numba threads per worker (0 = auto)')
-	parser.add_argument('--make_dataset', action='store_true', help='Export synthetic dataset matching data/train structure (Task_2_ICASSP)')
+	parser.add_argument('--make_dataset', action='store_true', help='Export synthetic dataset as NPZ+JSON per sample (precise arrays + metadata)')
 	parser.add_argument('--data_out', type=str, default='data/synthetic', help='Output dataset directory')
 	parser.add_argument('--run_id', type=str, default=None, help='Unique run identifier; auto-generated if omitted')
+	parser.add_argument('--viz', action='store_true', help='Additionally save PNG visualizations for streamed pipeline')
 	args = parser.parse_args()
 
 	# If requested, build synthetic dataset and exit
@@ -264,13 +252,15 @@ def main():
 
 	# Building IDs: integer seconds timestamp + random offset [0, 1_000_000]
 
-	# Streamed Stage 1+2: generate->predict->save in batches
+	# Streamed Stage 1+2: generate->predict->save in batches (save NPZ+JSON per sample)
 	logging.info(f"Processing {N} samples in batches of {B} (backend={chosen_backend}, workers={chosen_workers})...")
-	model = Approx('combined')
+	model = Approx()
 	global_idx = 0
+	samples_dir = os.path.join(out_dir, 'samples')
+	os.makedirs(samples_dir, exist_ok=True)
 	for start in tqdm(range(0, N, B), desc='Batches'):
 		end = min(start + B, N)
-		batch = []  # (sample, refl, trans, scene, gidx)
+		batch = []  # (sample, mask, normals, refl, trans, dist, scene, gidx)
 		for _ in range(start, end):
 			mask, normals, scene, refl, trans, dist = generate_floor_scene()
 			# Stats (debug)
@@ -287,19 +277,50 @@ def main():
 
 			# Build sample aligned with approx.py expectations
 			sample = build_sample_from_generated(mask, normals, scene, refl, trans, dist, building_id=building_id)
-			batch.append((sample, refl, trans, scene, global_idx))
+			# Ensure ids is list-of-tuple
+			if not sample.ids or not isinstance(sample.ids, list):
+				sample.ids = [(int(building_id), 0, 0, 0)]
+			elif isinstance(sample.ids, tuple):
+				sample.ids = [tuple(int(v) for v in sample.ids)]
+			batch.append((sample, mask, normals, refl, trans, dist, scene, global_idx))
 			global_idx += 1
 
 		# Predict for this batch
 		samples = [t[0] for t in batch]
 		preds = model.predict(samples, num_workers=chosen_workers, numba_threads=chosen_numba_threads, backend=chosen_backend)
-		for (sample, refl, trans, scene, gidx), pred_t in zip(batch, preds):
+		for (sample, mask, normals, refl, trans, dist, scene, gidx), pred_t in zip(batch, preds):
 			pred = pred_t.cpu().numpy() if hasattr(pred_t, 'cpu') else np.array(pred_t)
-			width_m = scene['canvas']['width_m']; height_m = scene['canvas']['height_m']
-			freq = scene.get('frequency_MHz', 1800)
-			viz_name = f'pipeline_demo_{gidx:06d}_{run_id}.png'
-			viz_path = os.path.join(out_dir, viz_name)
-			visualize_triplet(trans, refl, pred, sample.x_ant, sample.y_ant, width_m, height_m, freq, save_path=viz_path)
+			# Save precise per-sample bundle
+			distance_m = (dist.astype(np.float32, copy=False)) * float(sample.pixel_size)
+			freq_MHz = int(scene.get('frequency_MHz', 1800))
+			sample_name = f's{gidx:06d}'
+			arrays = {
+				'normals': normals.astype(np.float32, copy=False),
+				'reflectance': refl.astype(np.float32, copy=False),
+				'transmittance': trans.astype(np.float32, copy=False),
+				'distance_m': distance_m,
+				'mask': mask.astype(np.uint8, copy=False),
+				'pathloss': pred.astype(np.float32, copy=False),
+			}
+			canvas = scene.get('canvas', {})
+			metadata = {
+				'sample_name': sample_name,
+				'shape_hw': [int(sample.H), int(sample.W)],
+				'pixel_size_m': float(sample.pixel_size),
+				'antenna': {'x_px': int(sample.x_ant), 'y_px': int(sample.y_ant)},
+				'frequency_MHz': int(freq_MHz),
+				'canvas': {'width_m': float(canvas.get('width_m', 0.0)), 'height_m': float(canvas.get('height_m', 0.0))},
+				'ids': {'building': int(sample.ids[0][0]), 'antenna': int(sample.ids[0][1]), 'frequency_index': int(sample.ids[0][2]), 'sample_index': int(sample.ids[0][3])},
+				'created_at_unix_s': float(time.time()),
+			}
+			_export_sample_npz_json(samples_dir, sample_name, arrays, metadata)
+
+			# Optional visualization if requested via CLI flag
+			if getattr(args, 'viz', False):
+				width_m = canvas.get('width_m', 0.0); height_m = canvas.get('height_m', 0.0)
+				viz_name = f'viz_{gidx:06d}_{run_id}.png'
+				viz_path = os.path.join(out_dir, viz_name)
+				visualize_triplet(trans, refl, pred, sample.x_ant, sample.y_ant, width_m, height_m, freq_MHz, save_path=viz_path)
 
 	logging.info("All batches processed. Done.")
 
