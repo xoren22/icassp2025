@@ -237,6 +237,165 @@ def apply_backfill(out: np.ndarray, cnt: np.ndarray, x_ant: float, y_ant: float,
         return _backfill_fspl(out, cnt, x_ant, y_ant, pixel_size, freq_MHz, max_loss)
 
 # ---------------------------------------------------------------------#
+#  COMBINED2 VERSION (previous logic)                                   #
+# ---------------------------------------------------------------------#
+
+@njit(cache=False)
+def _trace_ray_recursive_combined2(
+    refl_mat, trans_mat, nx_img, ny_img,
+    out_img, counts,
+    x0, y0, dx, dy,
+    trans_ct, refl_ct,
+    acc_loss,
+    global_r,
+    pixel_size, freq_MHz,
+    radial_step, max_dist,
+    max_trans, max_refl, max_loss,
+    fspl_lut, use_lut
+):
+    # stop if already worse than the budget
+    if acc_loss >= max_loss:
+        return
+
+    px_hit, py_hit, px_prev, py_prev, travelled, last_val, cur_val = _step_until_wall(
+        trans_mat, x0, y0, dx, dy, radial_step, max_dist
+    )
+
+    # ─ paint current segment (min-dB rule) ─
+    steps = int(travelled / radial_step) + 1
+    for s in range(1, steps):  # s=0 would double-paint
+        xi = x0 + dx * radial_step * s
+        yi = y0 + dy * radial_step * s
+        ix = int(round(xi));  iy = int(round(yi))
+        if ix < 0 or ix >= out_img.shape[1] or iy < 0 or iy >= out_img.shape[0]:
+            break
+
+        if use_lut:
+            k = int(global_r + s)
+            fspl = _fspl_from_lut(fspl_lut, k)
+        else:
+            fspl = _fspl((global_r + radial_step * s) * pixel_size, freq_MHz)
+        tot  = acc_loss + fspl
+        if tot > max_loss:
+            tot = max_loss
+
+        # min-dB merge
+        if tot < out_img[iy, ix]:
+            out_img[iy, ix] = tot
+        counts[iy, ix] += 1.0
+
+    # If the segment was too short to paint (travelled < radial_step), paint its endpoint pixel once
+    if steps <= 1:
+        ix = px_prev; iy = py_prev
+        if 0 <= ix < out_img.shape[1] and 0 <= iy < out_img.shape[0]:
+            if use_lut:
+                k = int(global_r + travelled)
+                fspl = _fspl_from_lut(fspl_lut, k)
+            else:
+                fspl = _fspl((global_r + travelled) * pixel_size, freq_MHz)
+            tot = acc_loss + fspl
+            if tot > max_loss:
+                tot = max_loss
+            if tot < out_img[iy, ix]:
+                out_img[iy, ix] = tot
+            counts[iy, ix] += 1.0
+
+    # left the map?
+    if px_hit < 0:
+        return
+
+    # Handle wall crossing (previous version logic)
+    if last_val > 0. and cur_val == 0.:
+        acc_loss += last_val  # Add transmission loss
+        trans_ct += 1
+        if acc_loss >= max_loss or trans_ct > max_trans:
+            return
+
+    # advance position & distance
+    new_x = x0 + dx * travelled
+    new_y = y0 + dy * travelled
+    new_r = global_r + travelled
+
+    # ─ straight continuation ─
+    _trace_ray_recursive_combined2(
+        refl_mat, trans_mat, nx_img, ny_img,
+        out_img, counts,
+        new_x, new_y, dx, dy,
+        trans_ct, refl_ct,
+        acc_loss, new_r,
+        pixel_size, freq_MHz,
+        radial_step, max_dist,
+        max_trans, max_refl, max_loss,
+        fspl_lut, use_lut
+    )
+
+    # ─ reflection branch ─
+    if refl_ct < max_refl:
+        # Reflect only on reflective walls (guard against normals from pure transmission)
+        refl_val = refl_mat[py_hit, px_hit]
+        if refl_val > 0.0:
+            nx, ny = _estimate_normal(nx_img, ny_img, px_hit, py_hit)
+            if nx != 0.0 or ny != 0.0:
+                rdx, rdy = _reflect_dir(dx, dy, nx, ny)
+                _trace_ray_recursive_combined2(
+                    refl_mat, trans_mat, nx_img, ny_img,
+                    out_img, counts,
+                    new_x, new_y, rdx, rdy,
+                    trans_ct, refl_ct + 1,
+                    acc_loss + refl_val,
+                    new_r,
+                    pixel_size, freq_MHz,
+                    radial_step, max_dist,
+                    max_trans, max_refl, max_loss,
+                    fspl_lut, use_lut
+                )
+
+@njit(parallel=True, fastmath=True, nogil=True, boundscheck=False, cache=False)
+def calculate_combined_loss_with_normals_v2(
+    reflectance_mat, transmittance_mat, nx_img, ny_img,
+    x_ant, y_ant, freq_MHz,
+    n_angles,
+    max_refl=MAX_REFL, max_trans=MAX_TRANS,
+    pixel_size=0.25,
+    radial_step=1.0,
+    max_loss=32000.0,
+    use_fspl_lut=True
+):
+    h, w = reflectance_mat.shape
+    out  = np.full((h, w), max_loss, np.float32)
+    cnt  = np.zeros((h, w), np.float32)
+
+    dtheta   = 2.0 * np.pi / n_angles
+    max_dist = np.hypot(w, h)
+    cos_v    = np.cos(np.arange(n_angles) * dtheta)
+    sin_v    = np.sin(np.arange(n_angles) * dtheta)
+
+    # FSPL LUT only valid when radial_step == 1.0 (indexes by integer step count)
+    use_lut = use_fspl_lut and (radial_step == 1.0)
+    if use_lut:
+        max_steps = int(max_dist) + 2
+        fspl_lut = _build_fspl_lut(max_steps, pixel_size, freq_MHz)
+    else:
+        fspl_lut = np.zeros(1, np.float64)  # dummy to satisfy typing
+
+    for i in prange(n_angles):
+        _trace_ray_recursive_combined2(
+            reflectance_mat, transmittance_mat,
+            nx_img, ny_img,
+            out, cnt,
+            x_ant, y_ant,
+            cos_v[i], sin_v[i],
+            0, 0,
+            0.0, 0.0,
+            pixel_size, freq_MHz,
+            radial_step, max_dist,
+            max_trans, max_refl, max_loss,
+            fspl_lut, use_lut
+        )
+
+    return out, cnt
+
+# ---------------------------------------------------------------------#
 #  STEP-UNTIL-WALL                                                     #
 # ---------------------------------------------------------------------#
 @njit(inline='always')
@@ -343,31 +502,29 @@ def _trace_ray_recursive(
     if px_hit < 0:
         return
 
-    # crossing a wall (air → wall exit)
-    if last_val > 0. and cur_val == 0.:
-        acc_loss += last_val
-        trans_ct += 1
-        if acc_loss >= max_loss or trans_ct > max_trans:
-            return
-
     # advance position & distance
     new_x = x0 + dx * travelled
     new_y = y0 + dy * travelled
     new_r = global_r + travelled
 
-    
-    # ─ straight continuation ─
-    _trace_ray_recursive(
-        refl_mat, trans_mat, nx_img, ny_img,
-        out_img, counts,
-        new_x, new_y, dx, dy,
-        trans_ct, refl_ct,
-        acc_loss, new_r,
-        pixel_size, freq_MHz,
-        radial_step, max_dist,
-        max_trans, max_refl, max_loss,
-        fspl_lut, use_lut
-    )
+    # Branch-specific handling at boundary
+    is_transmit_exit = (last_val > 0. and cur_val == 0.)
+
+    # ─ straight continuation (transmitted branch if crossing) ─
+    acc_loss_trans = acc_loss + (last_val if is_transmit_exit else 0.0)
+    trans_ct_trans = trans_ct + (1 if is_transmit_exit else 0)
+    if not (acc_loss_trans >= max_loss or trans_ct_trans > max_trans):
+        _trace_ray_recursive(
+            refl_mat, trans_mat, nx_img, ny_img,
+            out_img, counts,
+            new_x, new_y, dx, dy,
+            trans_ct_trans, refl_ct,
+            acc_loss_trans, new_r,
+            pixel_size, freq_MHz,
+            radial_step, max_dist,
+            max_trans, max_refl, max_loss,
+            fspl_lut, use_lut
+        )
 
     # ─ reflection branch ─
     if refl_ct < max_refl:
@@ -377,10 +534,18 @@ def _trace_ray_recursive(
             nx, ny = _estimate_normal(nx_img, ny_img, px_hit, py_hit)
             if nx != 0.0 or ny != 0.0:
                 rdx, rdy = _reflect_dir(dx, dy, nx, ny)
+                # Start the reflected ray on the air side to avoid charging a spurious transmission
+                # when immediately exiting the wall after reflecting.
+                if (last_val == 0.0 and cur_val > 0.0):
+                    rx0 = float(px_prev)
+                    ry0 = float(py_prev)
+                else:
+                    rx0 = new_x
+                    ry0 = new_y
                 _trace_ray_recursive(
                     refl_mat, trans_mat, nx_img, ny_img,
                     out_img, counts,
-                    new_x, new_y, rdx, rdy,
+                    rx0, ry0, rdx, rdy,
                     trans_ct, refl_ct + 1,
                     acc_loss + refl_val,
                     new_r,
@@ -400,7 +565,7 @@ def calculate_combined_loss_with_normals(
     max_refl=MAX_REFL, max_trans=MAX_TRANS,
     pixel_size=0.25,
     radial_step=1.0,
-    max_loss=160.0,
+    max_loss=32000.0,
     use_fspl_lut=True
 ):
     h, w = reflectance_mat.shape
@@ -408,7 +573,7 @@ def calculate_combined_loss_with_normals(
     cnt  = np.zeros((h, w), np.float32)
 
     dtheta   = 2.0 * np.pi / n_angles
-    max_dist = np.hypot(w, h)
+    max_dist = 100.0 * np.hypot(w, h)
     cos_v    = np.cos(np.arange(n_angles) * dtheta)
     sin_v    = np.sin(np.arange(n_angles) * dtheta)
 
@@ -460,7 +625,7 @@ def _warmup_numba_once():
 #  TRANSMISSION-ONLY TRACE                                             #
 # ---------------------------------------------------------------------#
 @njit(parallel=True, fastmath=True, nogil=True, boundscheck=False)
-def calculate_transmission_loss_numpy(trans_mat, x_ant, y_ant, freq_MHz, n_angles=360*128, radial_step=1.0, max_walls=MAX_TRANS, max_loss=160.0, pixel_size=0.25):
+def calculate_transmission_loss_numpy(trans_mat, x_ant, y_ant, freq_MHz, n_angles=360*128, radial_step=1.0, max_walls=MAX_TRANS, max_loss=32000.0, pixel_size=0.25):
 
     h, w  = trans_mat.shape
     out   = np.full((h,w), max_loss, np.float64)  # Initialize to max_loss like combined method
@@ -536,7 +701,7 @@ def _predict_worker(args):
     return model.approximate(sample, max_trans=max_trans, max_refl=max_refl)
 
 class Approx:
-    def __init__(self, method='combined'):
+    def __init__(self, method='combined2'):
         self.method = method
         _warmup_numba_once()
 
@@ -545,7 +710,7 @@ class Approx:
         ref, trans, _ = sample.input_img.cpu().numpy()
         x, y, f = sample.x_ant, sample.y_ant, sample.freq_MHz
         # Precomputed normals
-        building_id = sample.ids[0] if sample.ids else 0
+        building_id = sample.ids[0][0] if sample.ids else 0  # Extract building ID from tuple
         nx_img, ny_img = load_precomputed_normals_for_building(building_id, ref, trans)
         # Ensure contiguous dtypes for numba
         ref_c  = np.ascontiguousarray(ref, dtype=np.float64)
@@ -561,7 +726,19 @@ class Approx:
                 radial_step=1.0,
                 use_fspl_lut=True
             )
-            feat = apply_backfill(feat, cnt, x, y, 0.25, f, 160.0, BACKFILL_METHOD, BACKFILL_PARAMS, trans_mat=trans_c)
+            feat = apply_backfill(feat, cnt, x, y, 0.25, f, 32000.0, BACKFILL_METHOD, BACKFILL_PARAMS, trans_mat=trans_c)
+        elif self.method == 'combined2':
+            # Previous version logic (no proper transmission branching)
+            feat, cnt = calculate_combined_loss_with_normals_v2(
+                ref_c, trans_c, nx_img, ny_img,
+                x, y, f,
+                n_angles=N_ANGLES,
+                max_refl=max_refl,
+                max_trans=max_trans,
+                radial_step=1.0,
+                use_fspl_lut=True
+            )
+            feat = apply_backfill(feat, cnt, x, y, 0.25, f, 32000.0, BACKFILL_METHOD, BACKFILL_PARAMS, trans_mat=trans_c)
         elif self.method == 'combined_fast':
             # Aggressive speed settings; expect some accuracy loss
             fast_refl = max_refl if max_refl < 3 else 3
@@ -574,7 +751,7 @@ class Approx:
                 radial_step=1.0,
                 use_fspl_lut=True
             )
-            feat = apply_backfill(feat, cnt, x, y, 0.25, f, 160.0, BACKFILL_METHOD, BACKFILL_PARAMS, trans_mat=trans_c)
+            feat = apply_backfill(feat, cnt, x, y, 0.25, f, 32000.0, BACKFILL_METHOD, BACKFILL_PARAMS, trans_mat=trans_c)
         elif self.method == 'beamtrace':
             from beamtrace import calculate_beamtrace_loss_with_normals  # local import to avoid cyclic jit cost
             feat, _ = calculate_beamtrace_loss_with_normals(
@@ -583,8 +760,8 @@ class Approx:
         else:
             feat, cnt = calculate_transmission_loss_numpy(trans_c, x, y, f, n_angles=360*128, max_walls=max_trans)
             feat = feat.astype(np.float32)
-            feat = apply_backfill(feat, cnt.astype(np.float32), x, y, 0.25, f, 160.0, BACKFILL_METHOD, BACKFILL_PARAMS, trans_mat=trans_c)
-        feat = np.minimum(feat, 160.0)
+            feat = apply_backfill(feat, cnt.astype(np.float32), x, y, 0.25, f, 32000.0, BACKFILL_METHOD, BACKFILL_PARAMS, trans_mat=trans_c)
+        feat = np.minimum(feat, 32000.0)
         return torch.from_numpy(np.floor(feat))
 
     def predict(self, samples, max_trans=MAX_TRANS, max_refl=MAX_REFL, num_workers: int = 0, numba_threads: int = 0, backend: str = "threads"):
@@ -667,7 +844,7 @@ if __name__ == "__main__":
             radial_step=1.0,
             use_fspl_lut=True)
         # Apply backfill to combined for fair comparison
-        cmb_map = apply_backfill(cmb_map.astype(np.float32), cmb_cnt.astype(np.float32), x, y, 0.25, f, 160.0, BACKFILL_METHOD, BACKFILL_PARAMS, trans_mat=trans)
+        cmb_map = apply_backfill(cmb_map.astype(np.float32), cmb_cnt.astype(np.float32), x, y, 0.25, f, 32000.0, BACKFILL_METHOD, BACKFILL_PARAMS, trans_mat=trans)
 
         if args.compare0:
             compare_two_matrices(cmb_map, tx_map,
@@ -680,18 +857,23 @@ if __name__ == "__main__":
 
     # --- full-budget predictions for RMSE ---
     comb_model = Approx("combined")
+    comb2_model = Approx("combined2")
     txonly_model = Approx("transmission")
 
-    print("Predicting combined")
+    print("Predicting combined (v1)")
     preds_comb = comb_model.predict(samples, max_refl=MAX_REFL, num_workers=args.workers, numba_threads=args.numba_threads, backend=args.backend)
+    print("Predicting combined (v2)")
+    preds_comb2 = comb2_model.predict(samples, max_refl=MAX_REFL, num_workers=args.workers, numba_threads=args.numba_threads, backend=args.backend)
     print("Predicting tx-only")
     preds_tx   = txonly_model.predict(samples, max_refl=0, num_workers=args.workers, numba_threads=args.numba_threads, backend=args.backend)
 
     rms_c = [rmse(p, s.output_img) for p, s in zip(preds_comb, samples)]
+    rms_c2 = [rmse(p, s.output_img) for p, s in zip(preds_comb2, samples)]
     rms_t = [rmse(p, s.output_img) for p, s in zip(preds_tx, samples)]
 
-    print(f"RMSE (combined) : {np.mean(rms_c):.3f}")
-    print(f"RMSE (tx-only)  : {np.mean(rms_t):.3f}")
+    print(f"RMSE (combined v1) : {np.mean(rms_c):.3f}")
+    print(f"RMSE (combined v2) : {np.mean(rms_c2):.3f}")
+    print(f"RMSE (tx-only)     : {np.mean(rms_t):.3f}")
 
     # ────────────────────────────────────────────────────────────
     # Visual comparison (generic): GT + each approximator + all
@@ -703,13 +885,14 @@ if __name__ == "__main__":
     import numpy as _np
 
     n_show = min(args.viz_k, N)
-    base_names = ["GT", "Combined", "Tx-Only"]
+    base_names = ["GT", "Tx-Only", "Combined-v1", "Combined-v2"]
 
-    # sort indices by absolute RMSE difference between methods
-    diffs_rmse = _np.abs(_np.array(rms_c) - _np.array(rms_t))
+    # sort indices by absolute RMSE difference between combined methods
+    diffs_rmse = _np.abs(_np.array(rms_c) - _np.array(rms_c2))
     top_idx = _np.argsort(-diffs_rmse)[:n_show]
 
     mask_c0 = {}
+    mask_c20 = {}
     mask_t0 = {}
     if args.untouched:
         # For selected samples, compute and print untouched pixel counts using the same params
@@ -724,56 +907,70 @@ if __name__ == "__main__":
                 max_refl=MAX_REFL, max_trans=MAX_TRANS,
                 radial_step=1.0,
                 use_fspl_lut=True)
+            _, cnt_comb2 = calculate_combined_loss_with_normals_v2(
+                ref, trans, nx_i, ny_i, x, y, f,
+                n_angles=N_ANGLES,
+                max_refl=MAX_REFL, max_trans=MAX_TRANS,
+                radial_step=1.0,
+                use_fspl_lut=True)
             _, cnt_tx = calculate_transmission_loss_numpy(
                 trans, x, y, f, n_angles=360*128, max_walls=MAX_TRANS)
             total = cnt_comb.shape[0] * cnt_comb.shape[1]
             untouched_c = int((_np.sum(cnt_comb == 0)).item())
+            untouched_c2 = int((_np.sum(cnt_comb2 == 0)).item())
             untouched_t = int((_np.sum(cnt_tx == 0)).item())
             pct_c = 100.0 * untouched_c / total
+            pct_c2 = 100.0 * untouched_c2 / total
             pct_t = 100.0 * untouched_t / total
-            print(f"Untouched pixels [sample {idx}]: combined={untouched_c} ({pct_c:.2f}%), tx-only={untouched_t} ({pct_t:.2f}%)")
+            print(f"Untouched pixels [sample {idx}]: combined-v1={untouched_c} ({pct_c:.2f}%), combined-v2={untouched_c2} ({pct_c2:.2f}%), tx-only={untouched_t} ({pct_t:.2f}%)")
             mask_c0[idx] = (cnt_comb == 0)
+            mask_c20[idx] = (cnt_comb2 == 0)
             mask_t0[idx] = (cnt_tx == 0)
 
     for row, idx in enumerate(top_idx):
-        mats = [samples[idx].output_img, preds_comb[idx], preds_tx[idx]]
+        # Get all 4 matrices: GT, Tx-Only, Combined-v1, Combined-v2
+        gt = samples[idx].output_img
+        tx_only = preds_tx[idx]
+        comb_v1 = preds_comb[idx]
+        comb_v2 = preds_comb2[idx]
 
-        # pairwise diffs
-        diffs = []
-        diff_titles = []
-        for (a, b) in itertools.combinations(range(len(mats)), 2):
-            diffs.append(_np.abs(mats[a] - mats[b]))
-            diff_titles.append(f"|{base_names[a][0]}-{base_names[b][0]}|")
+        mats = [gt, tx_only, comb_v1, comb_v2]
 
-        row_mats = mats + diffs
-        row_titles = base_names.copy()
+        # Create the requested layout: GT | T_ONLY | C_1 | C2 | GT-T | GT-C1 | GT-C2 | C1-C2
+        row_mats = mats + [
+            _np.abs(gt - tx_only),    # GT-T
+            _np.abs(gt - comb_v1),    # GT-C1
+            _np.abs(gt - comb_v2),    # GT-C2
+            _np.abs(comb_v1 - comb_v2) # C1-C2
+        ]
+
+        row_titles = base_names.copy() + ["GT-T", "GT-C1", "GT-C2", "C1-C2"]
+
         # append RMSE for approximators in titles
-        row_titles[1] = f"Combined ({rmse(mats[1], mats[0]):.2f})"
-        row_titles[2] = f"Tx-Only ({rmse(mats[2], mats[0]):.2f})"
-        row_titles.extend(diff_titles)
-        if args.untouched and (idx in mask_c0) and (idx in mask_t0):
-            # add cnt==0 masks for a quick visual check
-            masks = [mask_c0[idx].astype(_np.float32), mask_t0[idx].astype(_np.float32)]
-            mask_titles = ["C0", "T0"]
-            row_mats   = row_mats + masks
-            row_titles = row_titles + mask_titles
+        row_titles[1] = f"Tx-Only ({rmse(mats[1], mats[0]):.2f})"
+        row_titles[2] = f"Combined-v1 ({rmse(mats[2], mats[0]):.2f})"
+        row_titles[3] = f"Combined-v2 ({rmse(mats[3], mats[0]):.2f})"
 
         if row == 0:
-            # create figure with dynamic column count after knowing sizes
-            n_cols = len(row_mats)
-            fig, axes = plt.subplots(n_show, n_cols, figsize=(4 * n_cols, 4 * n_show))
+            # create figure with 8 columns as requested
+            fig, axes = plt.subplots(n_show, 8, figsize=(32, 4 * n_show))
             axes = _np.atleast_2d(axes)
 
         for col, (mat, title) in enumerate(zip(row_mats, row_titles)):
             ax = axes[row, col]
             if col < len(mats):
+                # Original methods - use full color range
                 im = ax.imshow(mat)
             else:
-                # grayscale for diffs and masks
-                im = ax.imshow(mat, cmap='gray', vmin=0, vmax=1 if mat.dtype!=_np.float64 and mat.max()<=1.0 else None)
-            ax.set_title(title)
+                # Difference images - use grayscale with consistent scaling
+                vmax = max(_np.abs(gt - tx_only).max(),
+                          _np.abs(gt - comb_v1).max(),
+                          _np.abs(gt - comb_v2).max(),
+                          _np.abs(comb_v1 - comb_v2).max())
+                im = ax.imshow(mat, cmap='gray', vmin=0, vmax=vmax)
+            ax.set_title(title, fontsize=10)
             ax.axis('off')
-            fig.colorbar(im, ax=ax, fraction=0.04)
+            fig.colorbar(im, ax=ax, fraction=0.04, pad=0.04)
 
     plt.tight_layout(); plt.savefig("viz.png", dpi=150); plt.close(fig)
 
