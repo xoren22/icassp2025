@@ -6,6 +6,7 @@ from time import time
 from tqdm import tqdm
 from torchvision.io import read_image
 from torch.amp import autocast, GradScaler
+from memory_hogger import MemoryHogger
 
 from loss import se
 from inference import PathlossPredictor
@@ -47,39 +48,143 @@ def train_model(model, train_loader, val_samples, optimizer, scheduler, num_epoc
     best_loss = float('inf')
     scaler = GradScaler(enabled=True)
     inference_model = PathlossPredictor(model=model)
+
+    # GPU memory reservation: keep almost all VRAM reserved and free just-in-time headroom
+    hog = None
+    if device is not None and isinstance(device, torch.device) and device.type == 'cuda':
+        hog = MemoryHogger(device=str(device), base_headroom_mib=512, chunk_mib=32)
+        hog.reserve()
+
+    # Adaptive budgets per phase
+    budgets = {"train_step": None, "val_epoch": None}
+    safety_bytes = 1024 * 1024 * 1024
+    initial_headroom = 2 * 1024 * 1024 * 1024
+
+    # Optional warmup: one dry train step and a short eval to record peaks
+    # This helps set tighter budgets before the first epoch
+    if hog is not None:
+        try:
+            # Try grabbing one batch for warmup if available
+            first_batch = next(iter(train_loader))
+            inputs, targets, masks = first_batch
+            torch.cuda.reset_peak_memory_stats(device)
+            with hog.phase(initial_headroom + safety_bytes):
+                inputs = inputs.to(device)
+                targets = targets.to(device)
+                masks = masks.to(device)
+                optimizer.zero_grad()
+                with autocast('cuda'):
+                    preds = model(inputs)
+                    mask_sum = masks.sum()
+                    batch_se = se(preds, targets, masks)
+                    batch_mse = batch_se / masks.sum()
+                    loss = batch_mse
+                loss.backward()  # unscaled warmup backward
+                del inputs, targets, masks, preds, batch_se, batch_mse, loss, mask_sum
+            peak_b = torch.cuda.max_memory_reserved(device)
+            budgets["train_step"] = max(budgets["train_step"] or 0, int(peak_b))
+
+            torch.cuda.reset_peak_memory_stats(device)
+            with hog.phase(initial_headroom + safety_bytes):
+                _ = evaluate_model(inference_model=PathlossPredictor(model=model), val_samples=val_samples, batch_size=4)
+            peak_b = torch.cuda.max_memory_reserved(device)
+            budgets["val_epoch"] = max(budgets["val_epoch"] or 0, int(peak_b))
+        except StopIteration:
+            pass
+        except RuntimeError:
+            # If warmup OOMs, budgets will adapt during training
+            pass
     
     for epoch in range(num_epochs):
         print(f'Epoch {epoch+1}/{num_epochs}\n{"-"*10}')
         model.train()
 
         for batch_idx, (inputs, targets, masks) in enumerate(tqdm(train_loader), start=1):
-            inputs = inputs.to(device)
-            targets = targets.to(device)
-            masks = masks.to(device)
+            # Determine headroom for this step
+            headroom = budgets["train_step"] if budgets["train_step"] is not None else initial_headroom
+            retry_count = 0
+            max_retries = 3
 
-            optimizer.zero_grad()
-            with autocast('cuda'):
-                preds = model(inputs)
+            while True:
+                try:
+                    if hog is not None:
+                        torch.cuda.reset_peak_memory_stats(device)
+                        with hog.phase(headroom + safety_bytes):
+                            inputs = inputs.to(device)
+                            targets = targets.to(device)
+                            masks = masks.to(device)
 
-                mask_sum = masks.sum()
-                batch_se = se(preds, targets, masks)
-                batch_mse = batch_se / masks.sum()
-                
-                loss = batch_mse
+                            optimizer.zero_grad()
+                            with autocast('cuda'):
+                                preds = model(inputs)
 
-            scaler.scale(loss).backward()
-            scaler.step(optimizer)
-            scaler.update()
+                                mask_sum = masks.sum()
+                                batch_se = se(preds, targets, masks)
+                                batch_mse = batch_se / masks.sum()
+                                loss = batch_mse
 
-            logger.log_batch_loss(batch_se.item(), mask_sum.item())
+                            scaler.scale(loss).backward()
+                            scaler.step(optimizer)
+                            scaler.update()
 
-            del inputs, targets, masks, preds, batch_se, batch_mse, loss, mask_sum
+                            logger.log_batch_loss(batch_se.item(), mask_sum.item())
+
+                            del inputs, targets, masks, preds, batch_se, batch_mse, loss, mask_sum
+
+                        # update budget using observed peak
+                        peak_b = torch.cuda.max_memory_reserved(device)
+                        budgets["train_step"] = max(budgets["train_step"] or 0, int(peak_b))
+                    else:
+                        # CPU or no hogging: run as before
+                        inputs = inputs.to(device)
+                        targets = targets.to(device)
+                        masks = masks.to(device)
+
+                        optimizer.zero_grad()
+                        with autocast('cuda'):
+                            preds = model(inputs)
+
+                            mask_sum = masks.sum()
+                            batch_se = se(preds, targets, masks)
+                            batch_mse = batch_se / masks.sum()
+                            loss = batch_mse
+
+                        scaler.scale(loss).backward()
+                        scaler.step(optimizer)
+                        scaler.update()
+
+                        logger.log_batch_loss(batch_se.item(), mask_sum.item())
+
+                        del inputs, targets, masks, preds, batch_se, batch_mse, loss, mask_sum
+
+                    break
+                except RuntimeError as e:
+                    # Handle OOM by expanding headroom and retrying up to max_retries
+                    if ("out of memory" in str(e).lower()) and hog is not None and (retry_count < max_retries):
+                        retry_count += 1
+                        gc.collect()
+                        if torch.cuda.is_available():
+                            torch.cuda.empty_cache()
+                        headroom = max(int(headroom * 2), headroom + (512 * 1024 * 1024))
+                        continue
+                    raise
 
         t0 = time()
 
         inference_model.model = model
         inference_model.model.to(device)
-        val_loss = evaluate_model(inference_model=inference_model, val_samples=val_samples, batch_size=8)
+
+        # Validation epoch under a single hogger phase with adaptive headroom
+        if hog is not None:
+            headroom = budgets["val_epoch"] if budgets["val_epoch"] is not None else initial_headroom
+            torch.cuda.reset_peak_memory_stats(device)
+            with hog.phase(headroom + safety_bytes):
+                val_loss = evaluate_model(inference_model=inference_model, val_samples=val_samples, batch_size=8)
+            peak_b = torch.cuda.max_memory_reserved(device)
+            budgets["val_epoch"] = max(budgets["val_epoch"] or 0, int(peak_b))
+        else:
+            val_loss = evaluate_model(inference_model=inference_model, val_samples=val_samples, batch_size=8)
+
         print(f"Validation RMSE: {val_loss} taking {time() - t0}")
 
         current_lr = optimizer.param_groups[0]['lr']
@@ -101,3 +206,6 @@ def train_model(model, train_loader, val_samples, optimizer, scheduler, num_epoc
             torch.save(model.state_dict(), os.path.join(save_dir, f'epoch_{epoch}.pth'))
 
         gc.collect()
+
+    if hog is not None:
+        hog.release_all()
