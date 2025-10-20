@@ -247,7 +247,7 @@ def _build_synthetic_dataset(args):
 			'reflectance': refl.astype(np.float16, copy=False),
 			'transmittance': trans.astype(np.float16, copy=False),
 			'mask': mask.astype(np.uint8, copy=False),
-			'pathloss': pred.astype(np.uint16, copy=False),
+			'pathloss': pred.astype(np.float16, copy=False),
 		}
 		canvas = scene.get('canvas', {})
 		metadata = {
@@ -382,7 +382,7 @@ def main():
 				'reflectance': refl.astype(np.float16, copy=False),
 				'transmittance': trans.astype(np.float16, copy=False),
 				'mask': mask.astype(np.uint8, copy=False),
-				'pathloss': pred.astype(np.uint16, copy=False),
+				'pathloss': pred.astype(np.float16, copy=False),
 			}
 			canvas = scene.get('canvas', {})
 			metadata = {
