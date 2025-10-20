@@ -733,9 +733,22 @@ class Approx:
                     max_trans=MAX_TRANS, max_refl=MAX_REFL):
         ref, trans, _ = sample.input_img.cpu().numpy()
         x, y, f = sample.x_ant, sample.y_ant, sample.freq_MHz
-        # Precomputed normals
-        building_id = sample.ids[0][0] if sample.ids else 0  # Extract building ID from tuple
-        nx_img, ny_img = load_precomputed_normals_for_building(building_id, ref, trans)
+        # Prefer in-memory normals if provided on sample; fallback to disk
+        nx_img = None; ny_img = None
+        try:
+            if hasattr(sample, 'normals') and sample.normals is not None:
+                n = sample.normals
+                if isinstance(n, np.ndarray) and n.ndim == 3 and n.shape[2] == 2:
+                    nx_img = np.ascontiguousarray(n[..., 0], dtype=np.float64)
+                    ny_img = np.ascontiguousarray(n[..., 1], dtype=np.float64)
+            elif hasattr(sample, 'nx_img') and hasattr(sample, 'ny_img') and sample.nx_img is not None and sample.ny_img is not None:
+                nx_img = np.ascontiguousarray(sample.nx_img, dtype=np.float64)
+                ny_img = np.ascontiguousarray(sample.ny_img, dtype=np.float64)
+        except Exception:
+            nx_img = None; ny_img = None
+        if nx_img is None or ny_img is None:
+            building_id = sample.ids[0][0] if sample.ids else 0  # Extract building ID from tuple
+            nx_img, ny_img = load_precomputed_normals_for_building(building_id, ref, trans)
         # Ensure contiguous dtypes for numba
         ref_c  = np.ascontiguousarray(ref, dtype=np.float64)
         trans_c = np.ascontiguousarray(trans, dtype=np.float64)

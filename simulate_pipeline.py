@@ -260,6 +260,8 @@ def main():
 	acc_viz = 0.0
 	total_npz_bytes = 0
 	wall_t0 = time.perf_counter()
+	# Defer normals saving until the very end
+	pending_normals: list[tuple[int, np.ndarray, tuple[int,int]]] = []
 
 	for start in tqdm(range(0, N, B), desc='Batches'):
 		end = min(start + B, N)
@@ -277,16 +279,20 @@ def main():
 			max_trans = float(np.max(trans)) if nz_trans > 0 else 0.0
 			logging.debug(f"[{global_idx}] refl nz={nz_refl} [{min_refl:.2f},{max_refl:.2f}], trans nz={nz_trans} [{min_trans:.2f},{max_trans:.2f}]")
 
-			# Persist normals with requested building_id scheme
+
+			# Assign a building_id; defer saving normals until the end
 			building_id = int(time.time()) + np.random.randint(0, 1_000_000)
-			t0 = time.perf_counter()
-			_save_normals_npz(normals, building_id, mask.shape)
-			acc_save_normals += (time.perf_counter() - t0)
 
 			# Build sample aligned with approx.py expectations
 			t0 = time.perf_counter()
 			sample = build_sample_from_generated(mask, normals, scene, refl, trans, dist, building_id=building_id)
 			acc_build_sample += (time.perf_counter() - t0)
+			# Attach normals in-memory for the approximator to use; queue disk save for later
+			try:
+				sample.normals = normals
+			except Exception:
+				pass
+			pending_normals.append((building_id, normals, mask.shape))
 			# Ensure ids is list-of-tuple
 			if not sample.ids or not isinstance(sample.ids, list):
 				sample.ids = [(int(building_id), 0, 0, 0)]
@@ -351,6 +357,16 @@ def main():
 				f"per_sample: gen={acc_gen/batch_ct:.3f}s, save_normals={acc_save_normals/batch_ct:.3f}s, "
 				f"build_sample={acc_build_sample/batch_ct:.3f}s, predict={acc_predict/batch_ct:.3f}s, export={acc_export/batch_ct:.3f}s"
 			)
+
+	# Save all normals once at the end
+	if pending_normals:
+		t0 = time.perf_counter()
+		for bid, nrm, shp in pending_normals:
+			try:
+				_save_normals_npz(nrm, bid, shp)
+			except Exception:
+				pass
+		acc_save_normals += (time.perf_counter() - t0)
 
 	logging.info("All batches processed. Done.")
 	wall_t1 = time.perf_counter()
