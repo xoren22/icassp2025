@@ -207,7 +207,6 @@ def main():
 	parser = argparse.ArgumentParser("Room generation + approximation pipeline")
 	parser.add_argument('--num', type=int, default=5, help='Number of rooms to generate and approximate')
 	parser.add_argument('--batch_size', type=int, default=10, help='Batch size for generate->predict->save streaming')
-	parser.add_argument('--workers', type=int, default=0, help='Parallel workers for prediction (0/1 = auto)')
 	parser.add_argument('--backend', type=str, default='processes', choices=['threads','processes'], help='Parallel backend for prediction')
 	parser.add_argument('--numba_threads', type=int, default=0, help='Numba threads per worker (0 = auto)')
 	parser.add_argument('--make_dataset', action='store_true', help='Export synthetic dataset as NPZ+JSON per sample (precise arrays + metadata)')
@@ -224,15 +223,9 @@ def main():
 	N = int(max(1, args.num))
 	B = int(max(1, args.batch_size))
 
-	# Choose fast, safe defaults if not provided: processes backend, 1 Numba thread per worker
-	import multiprocessing as _mp
-	cpu = max(1, (_mp.cpu_count() or 2))
+	# Choose backend and threads; always use a single worker to avoid deadlocks
 	chosen_backend = args.backend
-	chosen_workers = args.workers if (args.workers and args.workers > 0) else max(1, cpu - 1)
 	chosen_numba_threads = args.numba_threads if (args.numba_threads and args.numba_threads > 0) else 1
-	# If user left backend at default or gave threads with ambiguous settings, prefer processes to avoid nested threading issues
-	if args.backend not in ('threads','processes') or args.backend == 'threads' and (args.workers is None or args.workers <= 0):
-		chosen_backend = 'processes'
 
 	base_out_root = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'generated_rooms')
 	os.makedirs(base_out_root, exist_ok=True)
@@ -253,7 +246,7 @@ def main():
 	# Building IDs: integer seconds timestamp + random offset [0, 1_000_000]
 
 	# Streamed Stage 1+2: generate->predict->save in batches (save NPZ+JSON per sample)
-	logging.info(f"Processing {N} samples in batches of {B} (backend={chosen_backend}, workers={chosen_workers})...")
+	logging.info(f"Processing {N} samples in batches of {B} (backend={chosen_backend})...")
 	model = Approx()
 	global_idx = 0
 	samples_dir = os.path.join(out_dir, 'samples')
@@ -287,7 +280,7 @@ def main():
 
 		# Predict for this batch
 		samples = [t[0] for t in batch]
-		preds = model.predict(samples, num_workers=chosen_workers, numba_threads=chosen_numba_threads, backend=chosen_backend)
+		preds = model.predict(samples, num_workers=1, numba_threads=chosen_numba_threads, backend=chosen_backend)
 		for (sample, mask, normals, refl, trans, dist, scene, gidx), pred_t in zip(batch, preds):
 			pred = pred_t.cpu().numpy() if hasattr(pred_t, 'cpu') else np.array(pred_t)
 			# Save precise per-sample bundle
