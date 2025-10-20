@@ -293,7 +293,7 @@ def main():
 	chosen_numba_threads = args.numba_threads if (args.numba_threads and args.numba_threads > 0) else 1
 	chosen_workers = int(max(1, args.workers))
 
-	base_out_root = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'generated_rooms')
+	base_out_root = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'data')
 	os.makedirs(base_out_root, exist_ok=True)
 
 	# Unique run identifier and output dir (non-overwriting)
