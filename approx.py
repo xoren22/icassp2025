@@ -161,47 +161,62 @@ def _backfill_diffuse_residual(out: np.ndarray, cnt: np.ndarray, x_ant: float, y
     return out2.astype(np.float32)
 
 
+@njit(cache=False)
 def _backfill_direct_los(out: np.ndarray, cnt: np.ndarray, trans_mat: np.ndarray, x_ant: float, y_ant: float, pixel_size: float, freq_MHz: float, max_loss: float) -> np.ndarray:
     h, w = out.shape
-    mask0 = (cnt == 0)
-    if not np.any(mask0):
-        return out
     out2 = out.copy()
-
-    # Precompute distance grid for FSPL
-    yy, xx = np.mgrid[0:h, 0:w]
-    dx = xx - x_ant
-    dy = yy - y_ant
-    dist = np.hypot(dx, dy) * pixel_size
-    dist = np.maximum(dist, 0.125)
-    fspl_grid = 20.0*np.log10(dist) + 20.0*np.log10(freq_MHz) - 27.55
+    mask0 = (cnt == 0)
 
     for py in range(h):
         for px in range(w):
             if not mask0[py, px]:
                 continue
+
             # DDA from antenna to (px,py)
-            x0, y0 = x_ant, y_ant
-            x1, y1 = float(px), float(py)
+            x0 = x_ant
+            y0 = y_ant
+            x1 = float(px)
+            y1 = float(py)
             ddx = x1 - x0
             ddy = y1 - y0
-            steps = int(max(abs(ddx), abs(ddy)))
+            adx = ddx if ddx >= 0.0 else -ddx
+            ady = ddy if ddy >= 0.0 else -ddy
+            steps = int(adx if adx >= ady else ady)
+
             if steps <= 0:
-                tot = fspl_grid[py, px]
-                out2[py, px] = tot if tot < max_loss else max_loss
+                dxp = float(px) - x_ant
+                dyp = float(py) - y_ant
+                dist = np.hypot(dxp, dyp) * pixel_size
+                if dist < 0.125:
+                    dist = 0.125
+                fspl = 20.0 * np.log10(dist) + 20.0 * np.log10(freq_MHz) - 27.55
+                tot = fspl
+                if tot > max_loss:
+                    tot = max_loss
+                out2[py, px] = tot
                 cnt[py, px] = 1.0
                 continue
+
             sx = ddx / steps
             sy = ddy / steps
             x = x0
             y = y0
-            last_val = None
+
+            # Initialize last_val from starting position if in bounds
+            ix0 = int(np.rint(x))
+            iy0 = int(np.rint(y))
+            if 0 <= ix0 < w and 0 <= iy0 < h:
+                last_val = float(trans_mat[iy0, ix0])
+            else:
+                last_val = 0.0
             sum_loss = 0.0
+
             for s in range(steps + 1):
-                ix = int(round(x)); iy = int(round(y))
+                ix = int(np.rint(x))
+                iy = int(np.rint(y))
                 if 0 <= ix < w and 0 <= iy < h:
                     val = float(trans_mat[iy, ix])
-                    if last_val is None:
+                    if s == 0:
                         last_val = val
                     if val != last_val and last_val > 0.0 and val == 0.0:
                         sum_loss += last_val
@@ -211,10 +226,19 @@ def _backfill_direct_los(out: np.ndarray, cnt: np.ndarray, trans_mat: np.ndarray
                     last_val = val
                 x += sx
                 y += sy
-            fspl = fspl_grid[py, px]
+
+            dxp = float(px) - x_ant
+            dyp = float(py) - y_ant
+            dist = np.hypot(dxp, dyp) * pixel_size
+            if dist < 0.125:
+                dist = 0.125
+            fspl = 20.0 * np.log10(dist) + 20.0 * np.log10(freq_MHz) - 27.55
             tot = sum_loss + fspl
-            out2[py, px] = tot if tot < max_loss else max_loss
+            if tot > max_loss:
+                tot = max_loss
+            out2[py, px] = tot
             cnt[py, px] = 1.0
+
     return out2.astype(np.float32)
 
 
