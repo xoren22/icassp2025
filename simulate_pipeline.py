@@ -45,13 +45,15 @@ def _export_sample_npz_json(out_root: str, sample_name: str, arrays: dict, metad
 	npz_path = os.path.join(sample_dir, f"{sample_name}.npz")
 	json_path = os.path.join(sample_dir, f"{sample_name}.json")
 
-	# Normalize dtypes for compact, precise storage
+	# Normalize dtypes for compact storage; preserve float16 as-is
 	np_arrays = {}
 	for key, val in arrays.items():
 		if isinstance(val, torch.Tensor):
 			val = val.detach().cpu().numpy()
 		if isinstance(val, np.ndarray):
-			if val.dtype.kind in ('f',):
+			if val.dtype == np.float16:
+				np_arrays[key] = val
+			elif val.dtype == np.float64:
 				np_arrays[key] = val.astype(np.float32, copy=False)
 			else:
 				np_arrays[key] = val
@@ -193,7 +195,7 @@ def visualize_triplet(transmittance, reflectance, pred, x_ant, y_ant, width_m, h
 def _build_synthetic_dataset(args):
 	"""
 	Generate a synthetic dataset as precise per-sample bundles (no PNG/CSV):
-	- <out_dir>/samples/<name>/<name>.npz arrays: normals(HxWx2), reflectance, transmittance, distance_m, mask, pathloss
+	- <out_dir>/<name>/<name>.npz arrays: normals(HxWx2), reflectance, transmittance, mask, pathloss
 	- <out_dir>/samples/<name>/<name>.json metadata: antenna(px), frequency_MHz, canvas(m), ids, pixel_size_m
 	"""
 	base_dir = os.path.dirname(os.path.abspath(__file__))
@@ -239,15 +241,13 @@ def _build_synthetic_dataset(args):
 		pred = approx_model.approximate(sample).cpu().numpy().astype(np.float32)
 
 		# Save per-sample arrays and metadata
-		distance_m = (dist.astype(np.float32, copy=False)) * float(sample.pixel_size)
 		sample_name = f'B{b}_Ant{ant_id}_f{f_idx}_S{sp}'
 		arrays = {
-			'normals': normals.astype(np.float32, copy=False),
-			'reflectance': refl.astype(np.float32, copy=False),
-			'transmittance': trans.astype(np.float32, copy=False),
-			'distance_m': distance_m,
+			'normals': normals.astype(np.float16, copy=False),
+			'reflectance': refl.astype(np.float16, copy=False),
+			'transmittance': trans.astype(np.float16, copy=False),
 			'mask': mask.astype(np.uint8, copy=False),
-			'pathloss': pred,
+			'pathloss': pred.astype(np.uint16, copy=False),
 		}
 		canvas = scene.get('canvas', {})
 		metadata = {
@@ -371,7 +371,6 @@ def main():
 		for (sample, mask, normals, refl, trans, dist, scene, gidx), pred_t in zip(batch, preds):
 			pred = pred_t.cpu().numpy() if hasattr(pred_t, 'cpu') else np.array(pred_t)
 			# Save precise per-sample bundle
-			distance_m = (dist.astype(np.float32, copy=False)) * float(sample.pixel_size)
 			freq_MHz = int(scene.get('frequency_MHz', 1800))
 			# Ensure per-run sample names don't collide with pre-existing ones in dir
 			if gidx == 0 and (not os.path.exists(os.path.join(samples_dir, f's{gidx:06d}'))):
@@ -379,12 +378,11 @@ def main():
 			next_idx = _scan_next_sample_index(samples_dir)
 			sample_name = f's{next_idx:06d}'
 			arrays = {
-				'normals': normals.astype(np.float32, copy=False),
-				'reflectance': refl.astype(np.float32, copy=False),
-				'transmittance': trans.astype(np.float32, copy=False),
-				'distance_m': distance_m,
+				'normals': normals.astype(np.float16, copy=False),
+				'reflectance': refl.astype(np.float16, copy=False),
+				'transmittance': trans.astype(np.float16, copy=False),
 				'mask': mask.astype(np.uint8, copy=False),
-				'pathloss': pred.astype(np.float32, copy=False),
+				'pathloss': pred.astype(np.uint16, copy=False),
 			}
 			canvas = scene.get('canvas', {})
 			metadata = {
