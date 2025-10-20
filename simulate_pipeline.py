@@ -7,6 +7,7 @@ from tqdm import tqdm
 import time
 import secrets
 import json
+import datetime
 
 from approx import Approx
 from helper import RadarSample
@@ -60,6 +61,68 @@ def _export_sample_npz_json(out_root: str, sample_name: str, arrays: dict, metad
 	with open(json_path, "w") as f:
 		json.dump(metadata, f, indent=2)
 	return npz_path, json_path
+
+
+def _ensure_unique_run_dir(base_root: str, desired_run_id: str | None) -> tuple[str, str]:
+	"""
+	Return (out_dir, run_id) such that out_dir does not exist.
+	If desired_run_id is None, use yyyy_mm_dd_hh_mm_ss; if exists, append _001, _002, ...
+	If desired_run_id is provided and exists, append numeric suffix similarly.
+	"""
+	if desired_run_id and len(str(desired_run_id)) > 0:
+		run_id = str(desired_run_id)
+	else:
+		now = datetime.datetime.now()
+		run_id = now.strftime("%Y_%m_%d_%H_%M_%S")
+	out_dir = os.path.join(base_root, run_id)
+	if not os.path.exists(out_dir):
+		return out_dir, run_id
+	# Add incremental suffix
+	i = 1
+	while True:
+		sfx = f"_{i:03d}"
+		cand = os.path.join(base_root, run_id + sfx)
+		if not os.path.exists(cand):
+			return cand, run_id + sfx
+		i += 1
+
+
+def _scan_next_sample_index(samples_dir: str) -> int:
+	"""Return the next numeric index so that s{index:06d} is free."""
+	try:
+		entries = os.listdir(samples_dir)
+	except FileNotFoundError:
+		return 0
+	max_idx = -1
+	for name in entries:
+		if len(name) >= 7 and name[0] == 's':
+			try:
+				n = int(name[1:])
+				max_idx = n if n > max_idx else max_idx
+			except Exception:
+				pass
+	return max_idx + 1
+
+
+def _generate_unique_building_id(expected_shape: tuple[int,int]) -> int:
+	"""
+	Generate a building_id such that parsed_buildings/B{building_id}_normals.npz doesn't already exist.
+	"""
+	base_dir = os.path.dirname(os.path.abspath(__file__))
+	parsed_dir = os.path.join(base_dir, "parsed_buildings")
+	os.makedirs(parsed_dir, exist_ok=True)
+	for _ in range(100):
+		bid = int(time.time()) + np.random.randint(0, 1_000_000)
+		path = os.path.join(parsed_dir, f"B{bid}_normals.npz")
+		if not os.path.exists(path):
+			return int(bid)
+	# Fallback: linear probe
+	probe = int(time.time())
+	while True:
+		path = os.path.join(parsed_dir, f"B{probe}_normals.npz")
+		if not os.path.exists(path):
+			return int(probe)
+		probe += 1
 
 
 def build_sample_from_generated(mask, normals, scene, reflectance, transmittance, dist_map, building_id: int = 0):
@@ -137,7 +200,7 @@ def _build_synthetic_dataset(args):
 	if not os.path.isabs(out_dir):
 		out_dir = os.path.join(base_dir, out_dir)
 
-	samples_dir = os.path.join(out_dir, 'samples')
+	samples_dir = out_dir
 	os.makedirs(samples_dir, exist_ok=True)
 
 	N = int(max(1, args.num))
@@ -209,7 +272,7 @@ def main():
 	parser.add_argument('--batch_size', type=int, default=10, help='Batch size for generate->predict->save streaming')
 	parser.add_argument('--backend', type=str, default='processes', choices=['threads','processes'], help='Parallel backend for prediction')
 	parser.add_argument('--numba_threads', type=int, default=0, help='Numba threads per worker (0 = auto)')
-	parser.add_argument('--workers', type=int, default=1, help='Number of workers for model.predict (1=sequential)')
+	parser.add_argument('--workers', type=int, default=2, help='Number of workers for model.predict (1=sequential)')
 	parser.add_argument('--seed', type=int, default=None, help='Base seed for deterministic generation (per-sample: seed+index)')
 	parser.add_argument('--make_dataset', action='store_true', help='Export synthetic dataset as NPZ+JSON per sample (precise arrays + metadata)')
 	parser.add_argument('--data_out', type=str, default='data/synthetic', help='Output dataset directory')
@@ -233,16 +296,8 @@ def main():
 	base_out_root = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'generated_rooms')
 	os.makedirs(base_out_root, exist_ok=True)
 
-	# Unique run identifier and output dir (safe across concurrent runs)
-	if args.run_id and len(str(args.run_id)) > 0:
-		run_id = str(args.run_id)
-	else:
-		# timestamp (µs) + pid + random 16-bit suffix
-		us = int(time.time() * 1_000_000)
-		pid = os.getpid() & 0xFFFF
-		rnd = secrets.randbits(16)
-		run_id = f"{us}_{pid:04x}_{rnd:04x}"
-	out_dir = os.path.join(base_out_root, run_id)
+	# Unique run identifier and output dir (non-overwriting)
+	out_dir, run_id = _ensure_unique_run_dir(base_out_root, args.run_id)
 	os.makedirs(out_dir, exist_ok=True)
 	logging.info(f"Run ID: {run_id}; outputs -> {out_dir}")
 
@@ -252,7 +307,7 @@ def main():
 	logging.info(f"Processing {N} samples in batches of {B} (backend={chosen_backend}, workers={chosen_workers})...")
 	model = Approx()
 	global_idx = 0
-	samples_dir = os.path.join(out_dir, 'samples')
+	samples_dir = out_dir
 	os.makedirs(samples_dir, exist_ok=True)
 	# Profiling accumulators
 	acc_gen = 0.0
@@ -289,8 +344,8 @@ def main():
 			logging.debug(f"[{global_idx}] refl nz={nz_refl} [{min_refl:.2f},{max_refl:.2f}], trans nz={nz_trans} [{min_trans:.2f},{max_trans:.2f}]")
 
 
-			# Assign a building_id; defer saving normals until the end
-			building_id = int(time.time()) + np.random.randint(0, 1_000_000)
+			# Assign a unique building_id; defer saving normals until the end
+			building_id = _generate_unique_building_id(mask.shape)
 
 			# Build sample aligned with approx.py expectations
 			t0 = time.perf_counter()
@@ -320,7 +375,11 @@ def main():
 			# Save precise per-sample bundle
 			distance_m = (dist.astype(np.float32, copy=False)) * float(sample.pixel_size)
 			freq_MHz = int(scene.get('frequency_MHz', 1800))
-			sample_name = f's{gidx:06d}'
+			# Ensure per-run sample names don't collide with pre-existing ones in dir
+			if gidx == 0 and (not os.path.exists(os.path.join(samples_dir, f's{gidx:06d}'))):
+				pass
+			next_idx = _scan_next_sample_index(samples_dir)
+			sample_name = f's{next_idx:06d}'
 			arrays = {
 				'normals': normals.astype(np.float32, copy=False),
 				'reflectance': refl.astype(np.float32, copy=False),
