@@ -293,7 +293,7 @@ def main():
 	chosen_numba_threads = args.numba_threads if (args.numba_threads and args.numba_threads > 0) else 1
 	chosen_workers = int(max(1, args.workers))
 
-	base_out_root = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'data')
+	base_out_root = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'data/synthetic')
 	os.makedirs(base_out_root, exist_ok=True)
 
 	# Unique run identifier and output dir (non-overwriting)
@@ -318,8 +318,7 @@ def main():
 	acc_viz = 0.0
 	total_npz_bytes = 0
 	wall_t0 = time.perf_counter()
-	# Defer normals saving until the very end
-	pending_normals: list[tuple[int, np.ndarray, tuple[int,int]]] = []
+	# No deferred normals saving; normals are stored per-sample NPZ
 
 	for start in tqdm(range(0, N, B), desc='Batches'):
 		end = min(start + B, N)
@@ -351,12 +350,11 @@ def main():
 			t0 = time.perf_counter()
 			sample = build_sample_from_generated(mask, normals, scene, refl, trans, dist, building_id=building_id)
 			acc_build_sample += (time.perf_counter() - t0)
-			# Attach normals in-memory for the approximator to use; queue disk save for later
+			# Attach normals in-memory for the approximator to use
 			try:
 				sample.normals = normals
 			except Exception:
 				pass
-			pending_normals.append((building_id, normals, mask.shape))
 			# Ensure ids is list-of-tuple
 			if not sample.ids or not isinstance(sample.ids, list):
 				sample.ids = [(int(building_id), 0, 0, 0)]
@@ -425,16 +423,6 @@ def main():
 				f"per_sample: gen={acc_gen/batch_ct:.3f}s, save_normals={acc_save_normals/batch_ct:.3f}s, "
 				f"build_sample={acc_build_sample/batch_ct:.3f}s, predict={acc_predict/batch_ct:.3f}s, export={acc_export/batch_ct:.3f}s"
 			)
-
-	# Save all normals once at the end
-	if pending_normals:
-		t0 = time.perf_counter()
-		for bid, nrm, shp in pending_normals:
-			try:
-				_save_normals_npz(nrm, bid, shp)
-			except Exception:
-				pass
-		acc_save_normals += (time.perf_counter() - t0)
 
 	logging.info("All batches processed. Done.")
 	wall_t1 = time.perf_counter()
