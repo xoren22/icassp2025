@@ -1,4 +1,6 @@
 import os
+# Force Numba to use TBB threading layer for all runs (set before importing approx/numba)
+os.environ["NUMBA_THREADING_LAYER"] = "tbb"
 import logging
 import numpy as np
 import torch
@@ -270,7 +272,6 @@ def main():
 	parser = argparse.ArgumentParser("Room generation + approximation pipeline")
 	parser.add_argument('--num', type=int, default=5, help='Number of rooms to generate and approximate')
 	parser.add_argument('--batch_size', type=int, default=10, help='Batch size for generate->predict->save streaming')
-	parser.add_argument('--backend', type=str, default='processes', choices=['threads','processes'], help='Parallel backend for prediction')
 	parser.add_argument('--numba_threads', type=int, default=0, help='Numba threads per worker (0 = auto)')
 	parser.add_argument('--workers', type=int, default=2, help='Number of workers for model.predict (1=sequential)')
 	parser.add_argument('--seed', type=int, default=None, help='Base seed for deterministic generation (per-sample: seed+index)')
@@ -288,8 +289,7 @@ def main():
 	N = int(max(1, args.num))
 	B = int(max(1, args.batch_size))
 
-	# Choose backend and threads
-	chosen_backend = args.backend
+	# Threads backend is always used
 	chosen_numba_threads = args.numba_threads if (args.numba_threads and args.numba_threads > 0) else 1
 	chosen_workers = int(max(1, args.workers))
 
@@ -304,7 +304,7 @@ def main():
 	# Building IDs: integer seconds timestamp + random offset [0, 1_000_000]
 
 	# Streamed Stage 1+2: generate->predict->save in batches (save NPZ+JSON per sample)
-	logging.info(f"Processing {N} samples in batches of {B} (backend={chosen_backend}, workers={chosen_workers})...")
+	logging.info(f"Processing {N} samples in batches of {B} (backend=threads, workers={chosen_workers})...")
 	model = Approx()
 	global_idx = 0
 	samples_dir = out_dir
@@ -368,7 +368,7 @@ def main():
 		# Predict for this batch
 		samples = [t[0] for t in batch]
 		t0 = time.perf_counter()
-		preds = model.predict(samples, num_workers=chosen_workers, numba_threads=chosen_numba_threads, backend=chosen_backend)
+		preds = model.predict(samples, num_workers=chosen_workers, numba_threads=chosen_numba_threads, backend='threads')
 		acc_predict += (time.perf_counter() - t0)
 		for (sample, mask, normals, refl, trans, dist, scene, gidx), pred_t in zip(batch, preds):
 			pred = pred_t.cpu().numpy() if hasattr(pred_t, 'cpu') else np.array(pred_t)
