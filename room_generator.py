@@ -658,10 +658,32 @@ def generate_floor_scene(width_m=None, height_m=None, px_per_m=4, seed=None):
     reflectance = np.zeros_like(wall_mask, dtype=np.float32)
     transmittance = np.zeros_like(wall_mask, dtype=np.float32)
     if np.any(wall_mask):
-        base_reflect = float(rng.uniform(1.0, 15.0))
-        base_trans = float(rng.uniform(5.0, 30.0))
-        reflectance[wall_mask] = base_reflect
-        transmittance[wall_mask] = base_trans
+        # Default: reflectance smaller than transmittance; 20% of cases inverted
+        invert_rare = rng.random() < 0.20
+        extreme_mix = rng.random() < 0.15
+
+        if not invert_rare:
+            # Typical case: smaller reflectance, larger transmittance
+            if extreme_mix:
+                # Make it more extreme: very small reflectance with larger transmittance
+                base_reflect = float(rng.uniform(0.1, 1.0))
+                base_trans   = float(rng.uniform(15.0, 30.0))
+            else:
+                base_reflect = float(rng.uniform(0.5, 8.0))
+                base_trans   = float(rng.uniform(8.0, 25.0))
+        else:
+            # Inverted case (rare ~20%): transmittance smaller than reflectance
+            if extreme_mix:
+                # Very small transmittance with higher reflectance (but respect refl cap ~15)
+                base_trans   = float(rng.uniform(0.1, 1.0))
+                base_reflect = float(rng.uniform(10.0, 15.0))
+            else:
+                base_trans   = float(rng.uniform(0.5, 8.0))
+                base_reflect = float(rng.uniform(8.0, 15.0))
+
+        reflectance[wall_mask] = float(np.clip(base_reflect, 0.0, 15.0))
+        # Allow transmittance to exceed 15 in non-window regions for variety (as before)
+        transmittance[wall_mask] = float(np.clip(base_trans, 0.0, 30.0))
 
         # Create low-frequency patches to simulate windows/thin parts with lower transmittance loss
         Hm, Wm = wall_mask.shape
@@ -684,13 +706,25 @@ def generate_floor_scene(width_m=None, height_m=None, px_per_m=4, seed=None):
                 xs = slice(max(0, dx), Wm + min(0, dx))
                 xd = slice(max(0, -dx), Wm + min(0, -dx))
                 wm[yd, xd] |= windows_mask[ys, xs]
-            red_factor = float(rng.uniform(0.3, 0.7))
-            trans_val = float(np.clip(base_trans * red_factor, 1.0, 15.0))
-            transmittance[wm] = trans_val
-            # Optionally slightly adjust reflectance near windows
-            rf_factor = float(rng.uniform(0.85, 1.0))
-            refl_val = float(np.clip(base_reflect * rf_factor, 1.0, 15.0))
-            reflectance[wm] = refl_val
+            # In window/patch regions, modulate the smaller quantity further for contrast
+            if not invert_rare:
+                # Make some areas thinner: reduce transmittance (upper bound ~15 inside patches)
+                red_factor = float(rng.uniform(0.3, 0.7))
+                trans_val = float(np.clip(base_trans * red_factor, 0.5, 15.0))
+                transmittance[wm] = trans_val
+                # Slight tweaks to reflectance
+                rf_factor = float(rng.uniform(0.85, 1.05))
+                refl_val = float(np.clip(base_reflect * rf_factor, 0.1, 15.0))
+                reflectance[wm] = refl_val
+            else:
+                # In inverted cases, reduce reflectance in patches for variety
+                rf_factor = float(rng.uniform(0.5, 0.9))
+                refl_val = float(np.clip(base_reflect * rf_factor, 0.1, 15.0))
+                reflectance[wm] = refl_val
+                # And keep transmittance a bit higher within reasonable bounds
+                tf_factor = float(rng.uniform(0.9, 1.1))
+                trans_val = float(np.clip(base_trans * tf_factor, 0.1, 20.0))
+                transmittance[wm] = trans_val
 
     return canvas.wall, normals, scene, reflectance, transmittance, dist_map
 
