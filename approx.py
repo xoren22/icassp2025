@@ -628,7 +628,7 @@ class Approx:
             feat, cnt = calculate_transmission_loss_numpy(trans_c, x, y, f, n_angles=360*128, max_walls=max_trans)
             feat = feat.astype(np.float32)
             feat = apply_backfill(feat, cnt.astype(np.float32), x, y, 0.25, f, 32000.0, BACKFILL_METHOD, BACKFILL_PARAMS, trans_mat=trans_c)
-        feat = np.minimum(feat, 200.0)
+        feat = np.minimum(feat, 32000.0)
         return torch.from_numpy(np.floor(feat))
 
     def predict(self, samples, max_trans=MAX_TRANS, max_refl=MAX_REFL, num_workers: int = 0, numba_threads: int = 0, backend: str = "threads", auto_convert: bool = True):
