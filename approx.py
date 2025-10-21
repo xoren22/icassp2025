@@ -8,7 +8,8 @@ os.environ.setdefault("NUMBA_NUM_THREADS", "1")
 from tqdm import tqdm
 import torch, numpy as np
 from numba import njit, prange
-from helper import (RadarSample, load_samples, rmse, visualize_predictions, compare_two_matrices, compare_hit_counts)
+from helper import (RadarSample, load_samples, rmse, visualize_predictions, compare_two_matrices, compare_hit_counts, read_sample)
+from normal_parser import precompute_wall_angles_pca
 from concurrent.futures import ProcessPoolExecutor
 import multiprocessing as _mp
 from concurrent.futures import ThreadPoolExecutor
@@ -50,7 +51,7 @@ def load_precomputed_normals_for_building(building_id: int, refl: np.ndarray, tr
 # ---------------------------------------------------------------------#
 MAX_REFL  = 5            # reflection budget for normal runs
 MAX_TRANS = 10           # transmission (wall) budget
-N_ANGLES  = 360*128//8      # single place to control angular resolution for combined method
+N_ANGLES  = 360*128      # single place to control angular resolution for combined method
 
 # Backfill configuration
 BACKFILL_METHOD = "los"     # options: "los", "diffuse", or "fspl"
@@ -595,7 +596,19 @@ class Approx:
                         building_id = int(first[0])
                     elif isinstance(first, (int, np.integer)):
                         building_id = int(first)
-            nx_img, ny_img = load_precomputed_normals_for_building(building_id, ref, trans)
+            try:
+                nx_img, ny_img = load_precomputed_normals_for_building(building_id, ref, trans)
+            except FileNotFoundError:
+                # Fallback: compute normals on-the-fly from reflectance/transmittance mask
+                building_mask = (ref + trans > 0).astype(np.uint8)
+                angles = precompute_wall_angles_pca(building_mask)
+                rad = np.deg2rad(angles + 90.0)
+                nx_img = np.cos(rad).astype(np.float64)
+                ny_img = np.sin(rad).astype(np.float64)
+                invalid = angles < 0
+                if np.any(invalid):
+                    nx_img = nx_img.copy(); ny_img = ny_img.copy()
+                    nx_img[invalid] = 0.0; ny_img[invalid] = 0.0
         # Ensure contiguous dtypes for numba
         ref_c  = np.ascontiguousarray(ref, dtype=np.float64)
         trans_c = np.ascontiguousarray(trans, dtype=np.float64)
@@ -615,15 +628,26 @@ class Approx:
             feat, cnt = calculate_transmission_loss_numpy(trans_c, x, y, f, n_angles=360*128, max_walls=max_trans)
             feat = feat.astype(np.float32)
             feat = apply_backfill(feat, cnt.astype(np.float32), x, y, 0.25, f, 32000.0, BACKFILL_METHOD, BACKFILL_PARAMS, trans_mat=trans_c)
-        feat = np.minimum(feat, 160.0)
+        feat = np.minimum(feat, 200.0)
         return torch.from_numpy(np.floor(feat))
 
-    def predict(self, samples, max_trans=MAX_TRANS, max_refl=MAX_REFL, num_workers: int = 0, numba_threads: int = 0, backend: str = "threads"):
+    def predict(self, samples, max_trans=MAX_TRANS, max_refl=MAX_REFL, num_workers: int = 0, numba_threads: int = 0, backend: str = "threads", auto_convert: bool = True):
         """Predict over a batch of samples.
         - num_workers <= 1: run sequentially
         - backend=='threads': use ThreadPool, set a low global Numba thread count to avoid oversubscription
         - backend=='processes': use ProcessPool (spawn-safe), set per-worker Numba threads
         """
+        # Optionally adapt input dictionaries into RadarSample with normals
+        if auto_convert:
+            adapted = []
+            for obj in samples:
+                if isinstance(obj, RadarSample):
+                    adapted.append(obj)
+                elif isinstance(obj, dict):
+                    adapted.append(read_sample(obj))
+                else:
+                    adapted.append(obj)
+            samples = adapted
         if num_workers is None or num_workers <= 1:
             return [self.approximate(s, max_trans, max_refl) for s in tqdm(samples, "predicting")]
         max_workers = num_workers if isinstance(num_workers, int) and num_workers > 0 else max(1, (_mp.cpu_count() or 2) - 1)

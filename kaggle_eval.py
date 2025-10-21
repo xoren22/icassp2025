@@ -132,8 +132,11 @@ def kaggle_async_eval(
 
 if __name__ == "__main__":
     model_ckpt_path = f'{BASE_DIR}/models/best_model.pth'
+    from approx import Approx
+
     kaggle_async_eval(
         epoch=1,
-        model_ckpt_path=model_ckpt_path,
+        # model_ckpt_path=model_ckpt_path,
+        model=Approx(),
     )
 
