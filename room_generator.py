@@ -394,7 +394,8 @@ def generate_floor_scene(width_m=None, height_m=None, px_per_m=4, seed=None):
     splits_drawn = 0
     # Scale partition budget with canvas area to keep density roughly stable
     A_px = float(W * H)
-    splits_density = 1.5e-4  # ~48 splits for 800x400 canvas
+    # Reduce wall density: fewer partition splits per unit area to lower walls/area ratio
+    splits_density = 24.0e-5  # previously 1.5e-4 (~48 splits for 800x400); now ~half
     max_splits = int(np.clip(splits_density * A_px, 35, 150))
 
     # Spatial bias map: encourages larger rooms in some areas and smaller in others
