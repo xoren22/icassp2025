@@ -253,7 +253,7 @@ def sample_canvas_size(seed: int) -> tuple:
     """
     # Embedded ranges (tweakable here only)
     MIN_AR, MAX_AR = 0.4, 2.5
-    MIN_H_M, MAX_H_M = 70.0, 160.0
+    MIN_H_M = MAX_H_M = 160.0 / MAX_AR
 
     rng = np.random.default_rng(int(seed) + 911_531)
 

@@ -16,17 +16,17 @@ def _generate_solution_df(model: PathlossPredictor, verbose=False, batch_size=8)
     """
     # 1) Gather all sample dictionaries.
     samples = []
-    for f_i in [1]:
-        freq_mhz = 868
+    for f_i in [1, 2]:
+        freq_mhz = [868, 2400][f_i - 1]
         for b in [1, 5]:
             for sp in range(25):
                 sample_id_prefix = f"B{b}_Ant1_f{f_i}_S{sp}_"
                 samples.append({
                     'freq_MHz': freq_mhz,
                     'sampling_position': sp,
-                    'input_file': f"{BASE_DIR}/data/kaggle/Evaluation_Data_T1/Inputs/Task_1/B{b}_Ant1_f{f_i}_S{sp}.png",
-                    'position_file': f"{BASE_DIR}/data/kaggle/Evaluation_Data_T1/Positions/Positions_B{b}_Ant1_f{f_i}.csv",
-                    'radiation_pattern_file': f'{BASE_DIR}/data/kaggle/Evaluation_Data_T1/Radiation_Patterns/Ant1_Pattern.csv',
+                    'input_file': f"{BASE_DIR}/data/kaggle/Evaluation_Data_T2/Inputs/Task_2/B{b}_Ant1_f{f_i}_S{sp}.png",
+                    'position_file': f"{BASE_DIR}/data/kaggle/Evaluation_Data_T2/Positions/Positions_B{b}_Ant1_f{f_i}.csv",
+                    'radiation_pattern_file': f'{BASE_DIR}/data/kaggle/Evaluation_Data_T2/Radiation_Patterns/Ant1_Pattern.csv',
                     # We'll store the ID prefix for generating row labels later
                     'id_prefix': sample_id_prefix
                 })
@@ -92,9 +92,9 @@ def _kaggle_eval_thread_fn(
     epoch: int,
     model,
     logger,
-    csv_save_path: str = f"{BASE_DIR}/Task1.csv",
-    competition: str = 'iprm-task-1',
-    submission_message: str = "My auto submission",
+    csv_save_path: str = f"{BASE_DIR}/Task2.csv",
+    competition: str = 'indoor-pathloss-radio-map-prediction-task-2', #'iprm-task-1',
+    submission_message: str = "My auto submission new",
 ):
     solution_df = _generate_solution_df(model)
     solution_df.to_csv(csv_save_path, index=False)
@@ -116,7 +116,7 @@ def kaggle_async_eval(
     model_ckpt_path=None,
     model=None,
     logger=None,
-    csv_save_path: str = f"{BASE_DIR}/Task1.csv",
+    csv_save_path: str = f"{BASE_DIR}/Task2.csv",
     competition: str = 'iprm-task-1',
     submission_message: str = "My auto submission",
 ):

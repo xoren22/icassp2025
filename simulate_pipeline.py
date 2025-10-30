@@ -108,6 +108,27 @@ def _scan_next_sample_index(samples_dir: str) -> int:
 	return max_idx + 1
 
 
+def _reserve_sample_dir(samples_dir: str, start_idx: int) -> str:
+    """
+    Reserve a unique sample directory by creating it without scanning the
+    whole directory. Avoids os.listdir on huge directories.
+    Returns the created sample name (e.g., 's000123').
+    """
+    idx = int(max(0, start_idx))
+    while True:
+        name = f"s{idx:06d}"
+        path = os.path.join(samples_dir, name)
+        try:
+            os.makedirs(path, exist_ok=False)
+            return name
+        except FileExistsError:
+            idx += 1
+            continue
+        except OSError:
+            # On transient I/O errors, advance and retry without directory listing
+            time.sleep(0.01)
+            idx += 1
+
 def _generate_unique_building_id(expected_shape: tuple[int,int]) -> int:
 	"""
 	Generate a building_id such that parsed_buildings/B{building_id}_normals.npz doesn't already exist.
@@ -372,11 +393,8 @@ def main():
 			pred = pred_t.cpu().numpy() if hasattr(pred_t, 'cpu') else np.array(pred_t)
 			# Save precise per-sample bundle
 			freq_MHz = int(scene.get('frequency_MHz', 1800))
-			# Ensure per-run sample names don't collide with pre-existing ones in dir
-			if gidx == 0 and (not os.path.exists(os.path.join(samples_dir, f's{gidx:06d}'))):
-				pass
-			next_idx = _scan_next_sample_index(samples_dir)
-			sample_name = f's{next_idx:06d}'
+			# Reserve a unique sample directory without listing the entire folder
+			sample_name = _reserve_sample_dir(samples_dir, gidx)
 			arrays = {
 				'normals': normals.astype(np.float16, copy=False),
 				'reflectance': refl.astype(np.float16, copy=False),
