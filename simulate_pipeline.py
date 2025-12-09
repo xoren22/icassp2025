@@ -299,6 +299,7 @@ def main():
 	parser.add_argument('--make_dataset', action='store_true', help='Export synthetic dataset as NPZ+JSON per sample (precise arrays + metadata)')
 	parser.add_argument('--data_out', type=str, default='data/synthetic', help='Output dataset directory')
 	parser.add_argument('--run_id', type=str, default=None, help='Unique run identifier; auto-generated if omitted')
+	parser.add_argument('--out_root', type=str, default=None, help='Root directory for streamed outputs (default: <repo>/data/synthetic)')
 	parser.add_argument('--viz', action='store_true', help='Additionally save PNG visualizations for streamed pipeline')
 	args = parser.parse_args()
 
@@ -314,7 +315,11 @@ def main():
 	chosen_numba_threads = args.numba_threads if (args.numba_threads and args.numba_threads > 0) else 1
 	chosen_workers = int(max(1, args.workers))
 
-	base_out_root = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'data/synthetic')
+	# Resolve output root for streaming pipeline
+	if args.out_root and len(str(args.out_root)) > 0:
+		base_out_root = args.out_root if os.path.isabs(args.out_root) else os.path.join(os.path.dirname(os.path.abspath(__file__)), args.out_root)
+	else:
+		base_out_root = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'data/synthetic')
 	os.makedirs(base_out_root, exist_ok=True)
 
 	# Unique run identifier and output dir (non-overwriting)
